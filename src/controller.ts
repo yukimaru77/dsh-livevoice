@@ -428,6 +428,7 @@ class LiveCallSession {
     const updates = Array.isArray(result) ? result : [result]
     for (const update of updates) {
       this.transcripts = update.state
+      if (update.emit === undefined) continue
       const duplicate = this.lastTranscript?.role === update.emit.role
         && this.lastTranscript.turn === update.emit.turn
         && this.lastTranscript.text === update.emit.text

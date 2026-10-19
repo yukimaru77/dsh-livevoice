@@ -44,9 +44,9 @@ export type LiveServerEvent =
   }
   | { type: 'output_audio.delta'; audio: string }
   | { type: 'input_transcript.added' | 'output_transcript.added'; item: { text: string } }
-  | { type: 'turn.created'; turn: { role: 'user' | 'assistant'; transcript: string } }
-  | { type: 'turn.delta'; delta: string }
-  | { type: 'turn.done'; turn: { role: 'user' | 'assistant'; transcript: string } }
+  | { type: 'turn.created'; turn: LiveTurn }
+  | { type: 'turn.delta'; delta: string; turnId?: string }
+  | { type: 'turn.done'; turn: LiveTurn }
   | {
     type: 'delegation.created'
     item: {
@@ -59,6 +59,9 @@ export type LiveServerEvent =
   | { type: LiveUsageSource; metrics: LiveUsageMetric[] }
   | { type: 'error'; message: string }
   | { type: 'unknown'; wireType: string }
+
+/** `id` is Codex's turn id; `turn.delta` names it as `turn_id`. */
+export type LiveTurn = { role: 'user' | 'assistant'; transcript: string; id?: string }
 
 export type LivePhase = 'connecting' | 'listening' | 'working' | 'speaking' | 'muted' | 'error'
 
@@ -119,11 +122,13 @@ function parseTranscriptAddedEvent(
   return { type, item: { text: item.text } }
 }
 
-function parseTurnRole(payload: UnknownRecord): { role: 'user' | 'assistant'; transcript: string } | null {
+function parseTurnRole(payload: UnknownRecord): LiveTurn | null {
   const turn = payload.turn
   if (!isRecord(turn) || (turn.role !== 'user' && turn.role !== 'assistant')) return null
   if (typeof turn.transcript !== 'string') return null
-  return { role: turn.role, transcript: turn.transcript }
+  return typeof turn.id === 'string' && turn.id.length > 0
+    ? { role: turn.role, transcript: turn.transcript, id: turn.id }
+    : { role: turn.role, transcript: turn.transcript }
 }
 
 function parseTurnCreatedEvent(payload: UnknownRecord): LiveServerEvent | null {
@@ -132,7 +137,10 @@ function parseTurnCreatedEvent(payload: UnknownRecord): LiveServerEvent | null {
 }
 
 function parseTurnDeltaEvent(payload: UnknownRecord): LiveServerEvent | null {
-  return typeof payload.delta === 'string' ? { type: 'turn.delta', delta: payload.delta } : null
+  if (typeof payload.delta !== 'string') return null
+  return typeof payload.turn_id === 'string' && payload.turn_id.length > 0
+    ? { type: 'turn.delta', delta: payload.delta, turnId: payload.turn_id }
+    : { type: 'turn.delta', delta: payload.delta }
 }
 
 function parseTurnDoneEvent(payload: UnknownRecord): LiveServerEvent | null {

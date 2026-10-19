@@ -117,7 +117,10 @@ describe('Frameless Bidi server events', () => {
         start_ms: 1000,
         end_ms: 1200,
       },
-    })).toEqual({ type: 'turn.created', turn: { role: 'user', transcript: ' Yeah' } })
+    })).toEqual({
+      type: 'turn.created',
+      turn: { role: 'user', transcript: ' Yeah', id: 'turn_EJ9XQNFB8yNZ4cdxujkMd' },
+    })
   })
 
   it('parses turn.delta fragments on the open turn', () => {
@@ -127,7 +130,8 @@ describe('Frameless Bidi server events', () => {
       turn_id: 'turn_EJ9XQNFB8yNZ4cdxujkMd',
       start_ms: 111000,
       end_ms: 111200,
-    })).toEqual({ type: 'turn.delta', delta: ' Yo' })
+    })).toEqual({ type: 'turn.delta', delta: ' Yo', turnId: 'turn_EJ9XQNFB8yNZ4cdxujkMd' })
+    expect(parseLiveServerEvent({ type: 'turn.delta', delta: ' Yo' })).toEqual({ type: 'turn.delta', delta: ' Yo' })
   })
 
   it('classifies unsupported events and rejects malformed known events', () => {

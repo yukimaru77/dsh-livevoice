@@ -16,11 +16,14 @@ export interface RoleTranscript {
 export interface TranscriptState {
   user: RoleTranscript
   assistant: RoleTranscript
+  /** Codex turn id -> role, so a late `turn.delta` lands on the turn it names. */
+  turnRoles?: Readonly<Record<string, LiveTranscript['role']>>
 }
 
 export interface TranscriptUpdate {
   state: TranscriptState
-  emit: LiveTranscript
+  /** Absent when only bookkeeping (turn ids) changed. */
+  emit?: LiveTranscript
   present?: LiveTranscript
 }
 
@@ -36,6 +39,10 @@ export function ingestLiveEvent(
 ): TranscriptUpdate | TranscriptUpdate[] | null {
   switch (event.type) {
     case 'input_transcript.added':
+      // Codex already answering means the user turn was closed; a bare ASR
+      // fragment now is that turn's tail (its turn.done carries the full
+      // text). A real barge-in opens a new user turn via turn.created.
+      if (state.user.final && state.user.text && !state.assistant.final) return null
       return applyAdd(state, 'user', event.item.text)
     case 'output_transcript.added': {
       const closed = closeOpenUser(state)
@@ -44,13 +51,22 @@ export function ingestLiveEvent(
       return next ?? closed
     }
     case 'turn.created': {
-      const closed = event.turn.role === 'assistant' ? closeOpenUser(state) : null
-      const next = applyAdd(closed?.state ?? state, event.turn.role, event.turn.transcript)
+      const tracked = rememberTurn(state, event.turn.id, event.turn.role)
+      const closed = event.turn.role === 'assistant' ? closeOpenUser(tracked) : null
+      const base = closed?.state ?? tracked
+      const next = applyAdd(base, event.turn.role, event.turn.transcript)
       if (closed && next) return [closed, next]
-      return next ?? closed
+      return next ?? closed ?? (tracked === state ? null : { state: tracked })
     }
-    case 'turn.delta':
-      return applyAdd(state, openRole(state), event.delta)
+    case 'turn.delta': {
+      const known = event.turnId === undefined ? undefined : state.turnRoles?.[event.turnId]
+      // A delta for a turn that is already closed (Codex started speaking
+      // before the user turn's last words arrived) belongs to that turn;
+      // its turn.done carries the full text, so never graft it onto the
+      // other role.
+      if (known !== undefined && state[known].final) return null
+      return applyAdd(state, known ?? openRole(state), event.delta)
+    }
     case 'turn.done': {
       const update = applyFinish(state, event.turn.role, event.turn.transcript)
       return update === null ? null : { ...update, present: update.emit }
@@ -58,6 +74,27 @@ export function ingestLiveEvent(
     default:
       return null
   }
+}
+
+function rememberTurn(
+  state: TranscriptState,
+  turnId: string | undefined,
+  role: LiveTranscript['role'],
+): TranscriptState {
+  if (turnId === undefined || state.turnRoles?.[turnId] === role) return state
+  // Only recent turns matter; keep the map from growing over a long call.
+  const recent = Object.entries(state.turnRoles ?? {}).slice(-15)
+  return { ...state, turnRoles: { ...Object.fromEntries(recent), [turnId]: role } }
+}
+
+/**
+ * Codex fragments carry their own leading whitespace (" you", ",", "? Please");
+ * keep it so punctuation does not grow a space and CJK stays unspaced.
+ */
+function joinFragment(current: string, raw: string): string {
+  const fragment = raw.trimEnd()
+  const glued = /^\s/u.test(fragment) ? `${current} ${fragment.trimStart()}` : `${current}${fragment}`
+  return glued.replaceAll(/\s+/g, ' ').trim()
 }
 
 function openRole(state: TranscriptState): LiveTranscript['role'] {
@@ -90,10 +127,12 @@ function applyAdd(
     nextText = normalized
   } else if (normalized.startsWith(current.text)) {
     nextText = normalized
-  } else if (current.text.endsWith(normalized)) {
+  } else if (current.text.endsWith(normalized) || current.text.startsWith(normalized)) {
+    // Already have these words: a repeated fragment, or a cumulative
+    // turn.created snapshot that lags the fragments assembled so far.
     nextText = current.text
   } else {
-    nextText = `${current.text} ${normalized}`.replaceAll(/\s+/g, ' ').trim()
+    nextText = joinFragment(current.text, text)
   }
   const bucket = { text: nextText, turn, final: false }
   const emit: LiveTranscript = { role, text: nextText, turn, final: false }

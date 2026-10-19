@@ -69,4 +69,71 @@ describe('live transcript assembly', () => {
     expect(after.finals).toEqual(['user:有没有结果'])
     expect(after.state.user.final).toBe(true)
   })
+
+  // Captured from a gpt-live-1-codex call (2026-10-19): Codex starts speaking
+  // before the user turn's last delta arrives, and sends both *_transcript.added
+  // fragments and a cumulative turn.created snapshot for the assistant.
+  it('keeps a late user delta off the assistant line and does not double the reply', () => {
+    let state = emptyTranscriptState()
+    const finals: string[] = []
+    const steps = [
+      { type: 'input_transcript.added', item: { text: 'Hello. Can' } },
+      { type: 'turn.created', turn: { id: 'turn_u', role: 'user', transcript: 'Hello. Can' } },
+      { type: 'input_transcript.added', item: { text: ' you' } },
+      { type: 'turn.delta', delta: ' you', turn_id: 'turn_u' },
+      { type: 'input_transcript.added', item: { text: ' hear me? Please reply with one short' } },
+      { type: 'turn.delta', delta: ' hear me? Please reply with one short', turn_id: 'turn_u' },
+      { type: 'output_transcript.added', item: { text: ' Yes' } },
+      { type: 'input_transcript.added', item: { text: ' sentence.' } },
+      { type: 'turn.delta', delta: ' sentence.', turn_id: 'turn_u' },
+      { type: 'output_transcript.added', item: { text: ',' } },
+      { type: 'output_transcript.added', item: { text: ' I can' } },
+      { type: 'output_transcript.added', item: { text: ' hear' } },
+      { type: 'output_transcript.added', item: { text: ' you' } },
+      {
+        type: 'turn.done',
+        turn: { id: 'turn_u', role: 'user', transcript: 'Hello. Can you hear me? Please reply with one short sentence.' },
+      },
+      { type: 'turn.created', turn: { id: 'turn_a', role: 'assistant', transcript: ' Yes, I can hear' } },
+      { type: 'turn.delta', delta: ' you', turn_id: 'turn_a' },
+      { type: 'output_transcript.added', item: { text: ' clearly' } },
+      { type: 'turn.delta', delta: ' clearly', turn_id: 'turn_a' },
+      { type: 'output_transcript.added', item: { text: '.' } },
+      { type: 'turn.delta', delta: '.', turn_id: 'turn_a' },
+    ]
+    const assistantLines: string[] = []
+    for (const payload of steps) {
+      const next = ingest(state, payload)
+      state = next.state
+      finals.push(...next.finals)
+      if (state.assistant.text) assistantLines.push(state.assistant.text)
+    }
+    expect(assistantLines.every(line => !line.includes('sentence'))).toBe(true)
+    expect(state.user.text, 'the late ASR tail must not open a new user turn')
+      .toBe('Hello. Can you hear me? Please reply with one short sentence.')
+    expect(state.assistant.text).toBe('Yes, I can hear you clearly.')
+    expect(finals).toEqual(['user:Hello. Can you hear me? Please reply with one short sentence.'])
+    const done = ingest(state, {
+      type: 'turn.done',
+      turn: { id: 'turn_a', role: 'assistant', transcript: ' Yes, I can hear you clearly.' },
+    })
+    expect(done.finals).toEqual(['assistant:Yes, I can hear you clearly.'])
+  })
+
+  it('glues CJK fragments without inventing spaces', () => {
+    let state = emptyTranscriptState()
+    state = ingest(state, { type: 'output_transcript.added', item: { text: '好的' } }).state
+    state = ingest(state, { type: 'output_transcript.added', item: { text: '，马上' } }).state
+    expect(state.assistant.text).toBe('好的，马上')
+  })
+
+  it('opens a new user turn on barge-in while Codex is still speaking', () => {
+    let state = emptyTranscriptState()
+    state = ingest(state, { type: 'input_transcript.added', item: { text: 'hi' } }).state
+    state = ingest(state, { type: 'output_transcript.added', item: { text: 'Hello there' } }).state
+    state = ingest(state, { type: 'turn.created', turn: { id: 'turn_b', role: 'user', transcript: 'wait' } }).state
+    expect(state.user).toMatchObject({ text: 'wait', final: false })
+    state = ingest(state, { type: 'input_transcript.added', item: { text: ' stop' } }).state
+    expect(state.user.text).toBe('wait stop')
+  })
 })
