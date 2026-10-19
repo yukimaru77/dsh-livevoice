@@ -4,7 +4,6 @@ import {
   parseTranscript,
   renderTranscript,
   renderWorkerHandoff,
-  WORKER_HANDOFF_PREFACE,
   type RealtimeDelegation,
 } from '../src/handoff.ts'
 
@@ -68,11 +67,26 @@ describe('parseTranscript', () => {
 })
 
 describe('renderWorkerHandoff', () => {
-  it('puts a worker-readable legend in front of the plain transcript', () => {
+  it('is exactly the plain transcript, with no preface, legend, or framing text', () => {
     const rendered = renderWorkerHandoff(brief)
-    const transcript = renderTranscript(brief)
-    expect(rendered).toBe(`${WORKER_HANDOFF_PREFACE}\n\n${transcript}`)
+    expect(rendered).toBe(renderTranscript(brief))
+    expect(rendered).toMatch(/^(?:user|assistant): /)
+    for (const banned of ['Live voice', 'handoff', 'worker', 'Codex', 'delegation', 'transcript', 'spoken conversation', '<']) {
+      expect(rendered?.toLowerCase()).not.toContain(banned.toLowerCase())
+    }
     expect(renderWorkerHandoff({ input: '  ', transcriptDelta: [] })).toBeUndefined()
+  })
+
+  it('contains only user:/assistant: lines, oldest context first then the current request last', () => {
+    const rendered = renderWorkerHandoff(brief)
+    expect(rendered).toBe(
+      [
+        'user: 我想要那种复古的死磕编码的感觉',
+        'assistant: 好，我帮你开一个方向。',
+        'user: 一匹马在跑',
+        'user: Build a retro horse-running demo in the current repo.',
+      ].join('\n'),
+    )
   })
 })
 
@@ -122,12 +136,5 @@ describe('briefLiveDelegation', () => {
     expect(parsed?.input).toBe(input)
     expect(parsed?.input).toBe(oral)
     expect(parsed?.transcriptDelta).toEqual([{ role: 'user', text: oral }])
-  })
-
-  it('tells the worker that context resolves fragments without expanding authorization', () => {
-    expect(WORKER_HANDOFF_PREFACE).toContain('resolve references or fragments')
-    expect(WORKER_HANDOFF_PREFACE).toContain('Context does not expand scope')
-    expect(WORKER_HANDOFF_PREFACE).toContain('authorize explanation only')
-    expect(WORKER_HANDOFF_PREFACE).toContain('Read-only status questions are valid requests')
   })
 })

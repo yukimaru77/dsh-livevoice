@@ -8,9 +8,6 @@ export interface RealtimeDelegation {
   readonly transcriptDelta: readonly TranscriptLine[]
 }
 
-export const WORKER_HANDOFF_PREFACE =
-  'The lines below are a plain transcript of a recent spoken conversation, oldest first, each prefixed with its speaker ("user:" or "assistant:"). Treat the final "user:" line as the user\'s current message and the earlier lines only as recent conversational context to resolve references or fragments. Preserve the user\'s wording, intent, and authorization. Context does not expand scope: discussion, hypotheticals, or asking how you would optimize authorize explanation only, while an explicit current request such as "optimize it now" may authorize changes. Read-only status questions are valid requests. Do not claim this session or its runtime is identical to any other assistant.'
-
 export function briefLiveDelegation(source: {
   liveText: string
   lastUserSpeech?: string
@@ -35,11 +32,10 @@ export function renderTranscript(delegation: RealtimeDelegation): string | undef
   return lines.join('\n')
 }
 
-export function renderWorkerHandoff(delegation: RealtimeDelegation): string | undefined {
-  const transcript = renderTranscript(delegation)
-  if (transcript === undefined) return undefined
-  return `${WORKER_HANDOFF_PREFACE}\n\n${transcript}`
-}
+// The worker handoff is the plain transcript itself: no preface, legend, or
+// framing text, so the backend sees exactly the same "user:"/"assistant:"
+// lines a human would read, with no sign a live-voice relay is involved.
+export const renderWorkerHandoff = renderTranscript
 
 export function parseTranscript(text: string): RealtimeDelegation | undefined {
   const trimmed = text.trim()
