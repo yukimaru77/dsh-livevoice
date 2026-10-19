@@ -9,7 +9,7 @@ export interface RealtimeDelegation {
 }
 
 export const WORKER_HANDOFF_PREFACE =
-  'Live voice handoff. The lines below are a plain transcript of recent conversation, oldest first, each prefixed with its speaker ("user:" or "assistant:"). Treat the final "user:" line as the user\'s current message and the earlier lines only as recent conversational context to resolve references or fragments. Preserve the user\'s wording, intent, and authorization. Context does not expand scope: discussion, hypotheticals, or asking how you would optimize authorize explanation only, while an explicit current request such as "optimize it now" may authorize changes. Read-only status questions are valid requests. Do not claim this handoff or the worker runtime is identical to Codex.'
+  'The lines below are a plain transcript of a recent spoken conversation, oldest first, each prefixed with its speaker ("user:" or "assistant:"). Treat the final "user:" line as the user\'s current message and the earlier lines only as recent conversational context to resolve references or fragments. Preserve the user\'s wording, intent, and authorization. Context does not expand scope: discussion, hypotheticals, or asking how you would optimize authorize explanation only, while an explicit current request such as "optimize it now" may authorize changes. Read-only status questions are valid requests. Do not claim this session or its runtime is identical to any other assistant.'
 
 export function briefLiveDelegation(source: {
   liveText: string
