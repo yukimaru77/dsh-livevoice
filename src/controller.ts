@@ -186,6 +186,7 @@ class LiveCallSession {
   private phase: LivePhase = 'connecting'
   private readonly delegations = new LiveDelegations()
   private transcripts: TranscriptState = emptyTranscriptState()
+  private readonly unknownEventTypes = new Set<string>()
   private lastTranscript: LiveTranscript | undefined
   private lastUsage: { source: LiveUsageSource; metrics: readonly LiveUsageMetric[] } | undefined
   private spoken: TranscriptLine[] = []
@@ -317,7 +318,13 @@ class LiveCallSession {
         this.fail(event.message)
         break
       case 'unknown':
-        console.log(`[dsh-livevoice] unknown live event ${event.wireType}`)
+        // Codex mirrors per-frame audio (session.input_audio.append,
+        // session.output_audio.delta) and delegation.context.appended acks on
+        // the sideband; log each new type once per call, not every frame.
+        if (!this.unknownEventTypes.has(event.wireType)) {
+          this.unknownEventTypes.add(event.wireType)
+          console.log(`[dsh-livevoice] unknown live event ${event.wireType} (further ones of this type are not logged)`)
+        }
         break
       default: {
         const _exhaustive: never = event

@@ -95,9 +95,7 @@ export class LiveSideband {
       socket.on('message', (data) => {
         const payload = typeof data === 'string' ? data : data.toString()
         const event = parseLiveServerEvent(payload)
-        if (event?.type === 'unknown') {
-          console.log(`[dsh-livevoice] unknown live event ${event.wireType}`)
-        }
+        // Unknown types are reported (once per type) by the call controller.
         if (event) this.handlers.onEvent(event)
       })
       if (this.signal?.aborted) onAbort()
