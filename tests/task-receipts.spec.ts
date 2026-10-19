@@ -96,7 +96,7 @@ describe('delegation task receipt walking skeleton', () => {
 
       expect(fixture.followup).toHaveBeenCalledOnce()
       const sent = fixture.followup.mock.calls[0]?.[0]
-      expect(sent.content[0].text).toContain('<input>How would you optimize this without changing it?</input>')
+      expect(sent.content[0].text).toContain('user: How would you optimize this without changing it?')
 
       const queued = events.find((event): event is Extract<LiveUiEvent, { type: 'task-receipt' }> =>
         event.type === 'task-receipt' && event.receipt.status === 'queued')
@@ -199,7 +199,7 @@ describe('delegation task receipt walking skeleton', () => {
       wire.liveEvent?.(delegation('fragment', '就这个'))
 
       const sent = fixture.followup.mock.calls[0]?.[0]
-      expect(sent.content[0].text).toContain('<input>就这个</input>')
+      expect(sent.content[0].text).toContain('user: 就这个')
       expect(sent.content[0].text).toContain('user: 假如让你优化插件，你会怎么做')
       expect(events).toContainEqual({
         type: 'task-receipt',

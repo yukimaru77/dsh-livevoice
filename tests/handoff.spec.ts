@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   briefLiveDelegation,
-  parseRealtimeDelegation,
-  renderRealtimeDelegation,
+  parseTranscript,
+  renderTranscript,
   renderWorkerHandoff,
   WORKER_HANDOFF_PREFACE,
   type RealtimeDelegation,
@@ -17,60 +17,50 @@ const brief: RealtimeDelegation = {
   ],
 }
 
-describe('renderRealtimeDelegation', () => {
-  it('wraps a brief and transcript as the Codex envelope', () => {
-    expect(renderRealtimeDelegation(brief)).toBe(
+describe('renderTranscript', () => {
+  it('renders context lines plain, oldest first, with the current input as the final user line', () => {
+    expect(renderTranscript(brief)).toBe(
       [
-        '<realtime_delegation>',
-        '  <input>Build a retro horse-running demo in the current repo.</input>',
-        '  <transcript_delta>user: 我想要那种复古的死磕编码的感觉',
+        'user: 我想要那种复古的死磕编码的感觉',
         'assistant: 好，我帮你开一个方向。',
-        'user: 一匹马在跑</transcript_delta>',
-        '</realtime_delegation>',
+        'user: 一匹马在跑',
+        'user: Build a retro horse-running demo in the current repo.',
       ].join('\n'),
     )
   })
 
   it('returns undefined for empty or whitespace-only input', () => {
-    expect(renderRealtimeDelegation({ input: '', transcriptDelta: [] })).toBeUndefined()
-    expect(renderRealtimeDelegation({ input: '   \n', transcriptDelta: brief.transcriptDelta })).toBeUndefined()
+    expect(renderTranscript({ input: '', transcriptDelta: [] })).toBeUndefined()
+    expect(renderTranscript({ input: '   \n', transcriptDelta: brief.transcriptDelta })).toBeUndefined()
   })
 
-  it('escapes XML in the brief and in transcript lines', () => {
-    const rendered = renderRealtimeDelegation({
-      input: 'Use <script> & "quotes" and \'apos\'',
+  it('does not escape special characters and flattens embedded newlines', () => {
+    const rendered = renderTranscript({
+      input: 'Use <script> & "quotes" and \'apos\'\nacross lines',
       transcriptDelta: [{ role: 'user', text: 'a < b & c' }],
     })
-    expect(rendered).toContain('<input>Use &lt;script&gt; &amp; &quot;quotes&quot; and &apos;apos&apos;</input>')
-    expect(rendered).toContain('user: a &lt; b &amp; c')
+    expect(rendered).toContain('user: a < b & c')
+    expect(rendered).toContain('user: Use <script> & "quotes" and \'apos\' across lines')
   })
 })
 
-describe('parseRealtimeDelegation', () => {
+describe('parseTranscript', () => {
   it('roundtrips a brief and mixed-role transcript', () => {
-    const rendered = renderRealtimeDelegation(brief)
+    const rendered = renderTranscript(brief)
     expect(rendered).toBeTypeOf('string')
-    expect(parseRealtimeDelegation(rendered ?? '')).toEqual(brief)
+    expect(parseTranscript(rendered ?? '')).toEqual(brief)
   })
 
-  it('roundtrips XML special characters', () => {
-    const original: RealtimeDelegation = {
-      input: 'Use <script> & "quotes" and \'apos\'',
-      transcriptDelta: [{ role: 'user', text: 'a < b & c' }],
-    }
-    const rendered = renderRealtimeDelegation(original)
-    expect(parseRealtimeDelegation(rendered ?? '')).toEqual(original)
-  })
-
-  it('returns undefined for empty input or non-envelope text', () => {
-    expect(parseRealtimeDelegation('')).toBeUndefined()
-    expect(parseRealtimeDelegation('<realtime_delegation>\n  <input>  </input>\n  <transcript_delta></transcript_delta>\n</realtime_delegation>')).toBeUndefined()
-    expect(parseRealtimeDelegation('这个demo,我应该把,随便做点啥好看的就行')).toBeUndefined()
+  it('returns undefined for empty text or text without a trailing user line', () => {
+    expect(parseTranscript('')).toBeUndefined()
+    expect(parseTranscript('assistant: hello')).toBeUndefined()
+    expect(parseTranscript('user:   ')).toBeUndefined()
+    expect(parseTranscript('这个demo,我应该把,随便做点啥好看的就行')).toBeUndefined()
   })
 
   it('trims surrounding whitespace before parsing', () => {
-    const rendered = renderRealtimeDelegation({ input: 'Run the tests', transcriptDelta: [] })
-    expect(parseRealtimeDelegation(`\n${rendered}\n`)).toEqual({
+    const rendered = renderTranscript({ input: 'Run the tests', transcriptDelta: [] })
+    expect(parseTranscript(`\n${rendered}\n`)).toEqual({
       input: 'Run the tests',
       transcriptDelta: [],
     })
@@ -78,10 +68,10 @@ describe('parseRealtimeDelegation', () => {
 })
 
 describe('renderWorkerHandoff', () => {
-  it('puts a GLM-readable legend in front of the envelope', () => {
+  it('puts a worker-readable legend in front of the plain transcript', () => {
     const rendered = renderWorkerHandoff(brief)
-    const envelope = renderRealtimeDelegation(brief)
-    expect(rendered).toBe(`${WORKER_HANDOFF_PREFACE}\n\n${envelope}`)
+    const transcript = renderTranscript(brief)
+    expect(rendered).toBe(`${WORKER_HANDOFF_PREFACE}\n\n${transcript}`)
     expect(renderWorkerHandoff({ input: '  ', transcriptDelta: [] })).toBeUndefined()
   })
 })
@@ -121,14 +111,14 @@ describe('briefLiveDelegation', () => {
     expect(briefLiveDelegation({ liveText: '现在优化' })).toBe('现在优化')
   })
 
-  it('puts the exact current request in <input> and recent speech in context', () => {
+  it('puts the exact current request as the final line and recent speech earlier in context', () => {
     const input = briefLiveDelegation({ liveText: oral, lastUserSpeech: oral })
     if (input === undefined) throw new Error('expected a brief')
-    const rendered = renderRealtimeDelegation({
+    const rendered = renderTranscript({
       input,
       transcriptDelta: [{ role: 'user', text: oral }],
     })
-    const parsed = parseRealtimeDelegation(rendered ?? '')
+    const parsed = parseTranscript(rendered ?? '')
     expect(parsed?.input).toBe(input)
     expect(parsed?.input).toBe(oral)
     expect(parsed?.transcriptDelta).toEqual([{ role: 'user', text: oral }])

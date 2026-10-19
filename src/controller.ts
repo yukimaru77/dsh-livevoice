@@ -344,7 +344,7 @@ class LiveCallSession {
     }
     const input = briefLiveDelegation({ liveText: request })
     if (input === undefined) return
-    const context = recentTranscript(this.spoken, this.transcripts.user.text)
+    const context = dedupeTrailingInput(recentTranscript(this.spoken, this.transcripts.user.text), input)
     const handoff = renderWorkerHandoff({
       input,
       transcriptDelta: context,
@@ -545,6 +545,14 @@ function taskReceiptOutcome(
     default:
       return { status: 'interrupted' }
   }
+}
+
+// renderWorkerHandoff always appends the current input as the final "user:"
+// line, so drop a trailing context line here that would otherwise duplicate it.
+function dedupeTrailingInput(lines: readonly TranscriptLine[], input: string): TranscriptLine[] {
+  const last = lines[lines.length - 1]
+  if (last === undefined || last.role !== 'user' || last.text.trim() !== input.trim()) return [...lines]
+  return lines.slice(0, -1)
 }
 
 function recentTranscript(lines: readonly TranscriptLine[], currentUserText = ''): TranscriptLine[] {
