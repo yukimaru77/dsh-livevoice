@@ -13,7 +13,7 @@ export type LiveSessionPayload = {
   model: typeof LIVE_MODEL
   instructions: string
   audio: { output: { voice: string } }
-  delegation: { type: 'client' }
+  delegation: { type: 'client'; ack_filler: false }
 }
 
 export type LiveClientMessage =
@@ -279,7 +279,7 @@ export function buildLiveSessionPayload(instructions: string, voice: string): Li
     model: LIVE_MODEL,
     instructions,
     audio: { output: { voice } },
-    delegation: { type: 'client' },
+    delegation: { type: 'client', ack_filler: false },
   }
 }
 

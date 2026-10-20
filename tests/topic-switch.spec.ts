@@ -37,6 +37,7 @@ function fixtureAgent() {
   const session = {
     id: "fixture-session",
     snapshotEvents: () => events,
+    append: vi.fn(),
   }
   const agent = {
     status: "idle",
@@ -68,15 +69,14 @@ function fixtureAgent() {
   }
 }
 
-function delegation(id: string, text: string): LiveServerEvent {
+function userTurn(id: string | undefined, text: string): LiveServerEvent {
+  return { type: 'turn.done', turn: { role: 'user', transcript: text, ...(id ? { id } : {}) } }
+}
+
+function modelDelegation(id: string, text: string): LiveServerEvent {
   return {
-    type: "delegation.created",
-    item: {
-      type: "delegation",
-      target: "client",
-      id,
-      content: [{ type: "input_text", text }],
-    },
+    type: 'delegation.created',
+    item: { type: 'delegation', target: 'client', id, content: [{ type: 'input_text', text }] },
   }
 }
 
@@ -100,23 +100,48 @@ const flush = () => new Promise(resolve => setTimeout(resolve, 10))
 
 type EndReason = Extract<SessionEvent, { type: 'turn/end' }>['data']['reason']
 
-async function scenario(run: (fixture: ReturnType<typeof fixtureAgent>, events: LiveUiEvent[], close: () => Promise<void>) => Promise<void>) {
+async function scenario(run: (fixture: ReturnType<typeof fixtureAgent>, events: LiveUiEvent[], close: () => Promise<void>, subscribe: (listener: (event: LiveUiEvent) => void) => () => void) => Promise<void>) {
   const fixture = fixtureAgent()
   const registry = new LiveCallRegistry(() => fixture.agent, async () => ({} as CodexAccess), {} as LiveProxy)
   const call = await registry.start({ sessionId: 'fixture-session', offer: 'fixture-offer' })
   const events: LiveUiEvent[] = []
   call.subscribe(event => events.push(event))
-  try { await run(fixture, events, () => call.close()) } finally { await call.close() }
+  try { await run(fixture, events, () => call.close(), listener => call.subscribe(listener)) } finally { await call.close() }
 }
 
 function end(fixture: ReturnType<typeof fixtureAgent>, turn: number, reason: EndReason = { kind: 'completed' }) {
   fixture.pushAndEmit({ type: 'turn/end', seq: turn * 100 + 99, time: 1, data: { turn, reason } })
 }
 
-function payload(id: string, commentary = false) {
-  return wire.sentMessages.filter(message => message.type === 'delegation.context.append'
-    && message.delegation_item_id === id && (commentary || message.channel === 'speakable'))
+function speakableCues() {
+  return wire.sentMessages.filter(message => message.type === 'session.context.append'
+    && message.channel === 'speakable')
+    .flatMap(message => 'content' in message ? message.content.map(block => block.text) : [])
+}
+
+function rawPayload() {
+  return wire.sentMessages.flatMap(message => 'content' in message
+    ? message.content.map(block => block.text) : []).join('')
+}
+
+function speech() {
+  const staged = wire.sentMessages.filter(message => message.type === 'session.context.append'
+    && message.channel === 'commentary')
     .flatMap(message => 'content' in message ? message.content.map(block => block.text) : []).join('')
+  return [...staged.matchAll(/<read_aloud id="[^"]+">\n([\s\S]*?)\n<\/read_aloud>/g)].map(match => match[1])
+}
+
+function payload(commentary = false) {
+  return commentary ? rawPayload() : speech().join('')
+}
+
+let assistantTurnNumber = 0
+async function finishSpeech() {
+  wire.liveEvent?.({
+    type: 'turn.done',
+    turn: { id: 'spoken-' + ++assistantTurnNumber, role: 'assistant', transcript: 'readout finished' },
+  })
+  await flush()
 }
 
 function latest(events: LiveUiEvent[], id: string) {
@@ -126,22 +151,156 @@ function latest(events: LiveUiEvent[], id: string) {
 beforeEach(() => {
   wire.liveEvent = undefined
   wire.sentMessages = []
+  assistantTurnNumber = 0
 })
 
-describe("LiveVoice topic-switch and multi-turn delegation scenarios", () => {
+describe('LiveVoice direct ASR and backend readout', () => {
+  it('mutes autonomous replies and waits for their actual final before enabling backend readout', async () => {
+    await scenario(async (fixture, events, _close, subscribe) => {
+      expect(events).toContainEqual({ type: 'playback', enabled: false })
+      wire.liveEvent?.({ type: 'input_transcript.added', item: { text: 'A かな' } })
+      wire.liveEvent?.(userTurn('A', 'A かな'))
+      const userPresentCalls = fixture.session.append.mock.calls.length
+      expect(userPresentCalls).toBeGreaterThan(0)
+      fixture.emit('agent/inbox/claimed', { message: fixture.followup.mock.calls[0][0], turn: 1 })
+      wire.liveEvent?.({ type: 'turn.created', turn: { id: 'local-reply', role: 'assistant', transcript: '' } })
+      wire.liveEvent?.({ type: 'output_transcript.added', item: { text: '独自の回答' } })
+      fixture.pushAndEmit(assistantEvent(1, 1, 'バックエンドの回答です。'))
+      end(fixture, 1)
+      await flush()
+      expect(wire.sentMessages).toEqual([])
+      expect(events.filter(event => event.type === 'playback')).toEqual([{ type: 'playback', enabled: false }])
+      expect(events.some(event => event.type === 'transcript' && event.transcript?.role === 'assistant')).toBe(false)
+      expect(fixture.session.append).toHaveBeenCalledTimes(userPresentCalls)
+
+      wire.liveEvent?.({ type: 'turn.done', turn: { id: 'local-reply', role: 'assistant', transcript: '独自の回答です。' } })
+      await flush()
+      expect(speech()).toEqual(['バックエンドの回答です。'])
+      expect(events.filter(event => event.type === 'playback').at(-1)).toEqual({ type: 'playback', enabled: true })
+      expect(fixture.session.append).toHaveBeenCalledTimes(userPresentCalls)
+      const replay: LiveUiEvent[] = []
+      subscribe(event => replay.push(event))()
+      expect(replay).toContainEqual({ type: 'playback', enabled: true })
+      expect(replay.some(event => event.type === 'transcript' && event.transcript?.role === 'assistant')).toBe(false)
+
+      wire.liveEvent?.({ type: 'output_transcript.added', item: { text: 'バックエンドの回答です。' } })
+      wire.liveEvent?.({ type: 'turn.done', turn: { id: 'readout-A', role: 'assistant', transcript: 'バックエンドの回答です。' } })
+      expect(events).toContainEqual({ type: 'playback', enabled: true })
+      expect(events.filter(event => event.type === 'playback').at(-1)).toEqual({ type: 'playback', enabled: true })
+      expect(events.some(event => event.type === 'transcript' && event.transcript?.text === 'バックエンドの回答です。')).toBe(true)
+      expect(fixture.session.append.mock.calls.length).toBeGreaterThan(userPresentCalls)
+
+      wire.liveEvent?.({ type: 'input_transcript.added', item: { text: '次は B' } })
+      expect(events.filter(event => event.type === 'playback').at(-1)).toEqual({ type: 'playback', enabled: false })
+      const mutedReplay: LiveUiEvent[] = []
+      subscribe(event => mutedReplay.push(event))()
+      expect(mutedReplay).toContainEqual({ type: 'playback', enabled: false })
+    })
+  })
+
+  it('does not release another queued script on a replayed assistant final and cancels queued readouts on close', async () => {
+    await scenario(async (fixture, events, close) => {
+      for (const [index, id] of ['A', 'B', 'C'].entries()) {
+        wire.liveEvent?.(userTurn(id, '質問 ' + id))
+        fixture.emit('agent/inbox/claimed', { message: fixture.followup.mock.calls[index][0], turn: 1 })
+        fixture.pushAndEmit(assistantEvent(1, index + 1, '回答 ' + id))
+      }
+      end(fixture, 1)
+      await flush()
+      expect(speech()).toEqual(['回答 A'])
+      const done: LiveServerEvent = { type: 'turn.done', turn: { id: 'readout-A', role: 'assistant', transcript: '回答 A' } }
+      wire.liveEvent?.(done)
+      await flush()
+      expect(speech()).toEqual(['回答 A', '回答 B'])
+      wire.liveEvent?.(done)
+      await flush()
+      expect(speech()).toEqual(['回答 A', '回答 B'])
+      wire.liveEvent?.({ type: 'turn.created', turn: { id: 'new-user', role: 'user', transcript: '' } })
+      expect(events.filter(event => event.type === 'playback').at(-1)).toEqual({ type: 'playback', enabled: false })
+      await close()
+      wire.liveEvent?.({ type: 'turn.done', turn: { id: 'readout-B', role: 'assistant', transcript: '回答 B' } })
+      await flush()
+      expect(speech()).toEqual(['回答 A', '回答 B'])
+    })
+  })
+
+  it('waits for actual final ASR, preserves its late tail, and ignores model delegations', async () => {
+    await scenario(async (fixture, events) => {
+      wire.liveEvent?.({ type: 'input_transcript.added', item: { text: 'A かな' } })
+      wire.liveEvent?.({ type: 'turn.created', turn: { id: 'user-A', role: 'user', transcript: 'A かな' } })
+      wire.liveEvent?.({ type: 'output_transcript.added', item: { text: 'A ですね。' } })
+      wire.liveEvent?.(modelDelegation('model-A', 'Choose option A'))
+      wire.liveEvent?.({ type: 'input_transcript.added', item: { text: '、まだ変えないで。' } })
+      expect(fixture.followup).not.toHaveBeenCalled()
+      const exact = '  A かな、まだ変えないで。\nどう思う？  '
+      wire.liveEvent?.(userTurn('user-A', exact))
+      wire.liveEvent?.(userTurn('user-A', exact))
+      wire.liveEvent?.(modelDelegation('model-B', 'Change to A'))
+      expect(fixture.followup).toHaveBeenCalledOnce()
+      expect(fixture.followup.mock.calls[0][0].content).toEqual([{ type: 'text', text: exact }])
+      expect(latest(events, 'user-A')).toMatchObject({
+        receipt: { input: exact, handoff: exact, context: [], status: 'queued' },
+      })
+      wire.liveEvent?.(userTurn('user-B', exact))
+      expect(fixture.followup).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  it('forwards short follow-ups and greetings without local semantic filtering', async () => {
+    await scenario(async fixture => {
+      for (const [index, text] of ['Aかな', 'ありがとう', 'こんにちは', 'Hi', 'うん'].entries()) {
+        wire.liveEvent?.(userTurn('user-' + index, text))
+      }
+      expect(fixture.followup.mock.calls.map(call => call[0].content[0].text))
+        .toEqual(['Aかな', 'ありがとう', 'こんにちは', 'Hi', 'うん'])
+      wire.liveEvent?.(userTurn('blank', ' \n '))
+      wire.liveEvent?.({ type: 'turn.done', turn: { id: 'assistant', role: 'assistant', transcript: '返答です' } })
+      expect(fixture.followup).toHaveBeenCalledTimes(5)
+    })
+  })
+
+  it('deduplicates unkeyed finals but permits the same words after fresh speech', async () => {
+    await scenario(async fixture => {
+      wire.liveEvent?.(userTurn(undefined, 'もう一度'))
+      wire.liveEvent?.(userTurn(undefined, 'もう一度'))
+      expect(fixture.followup).toHaveBeenCalledOnce()
+      wire.liveEvent?.({ type: 'turn.created', turn: { role: 'user', transcript: 'もう一度' } })
+      wire.liveEvent?.(userTurn(undefined, 'もう一度'))
+      wire.liveEvent?.(userTurn(undefined, 'もう一度'))
+      expect(fixture.followup).toHaveBeenCalledTimes(2)
+      wire.liveEvent?.(userTurn(undefined, '次は B'))
+      expect(fixture.followup).toHaveBeenCalledTimes(3)
+    })
+  })
+
+  it('steers exact ASR into active work and uses followup when no backend turn is open', async () => {
+    await scenario(async (fixture, events) => {
+      Object.assign(fixture.agent, { status: 'running' })
+      wire.liveEvent?.(userTurn('before-turn', 'こんにちは'))
+      expect(fixture.followup).toHaveBeenCalledOnce()
+      fixture.events.push({ type: 'turn/start', seq: 1, time: 1, data: { turn: 1 } } as SessionEvent)
+      wire.liveEvent?.(userTurn('during-turn', 'やっぱり B かな'))
+      expect(fixture.steer).toHaveBeenCalledOnce()
+      expect(fixture.steer.mock.calls[0][0].content).toEqual([{ type: 'text', text: 'やっぱり B かな' }])
+      expect(latest(events, 'during-turn')).toMatchObject({
+        receipt: { route: 'steer', requestKind: 'additional', status: 'queued' },
+      })
+    })
+  })
+
   it.each(['finish', 'discard-before', 'discard-after'] as const)('settles A independently of queued B: %s', async action => {
     await scenario(async (fixture, events) => {
-      wire.liveEvent?.(delegation('A', 'first question'))
+      wire.liveEvent?.(userTurn('A', 'first question'))
       const a = fixture.followup.mock.calls[0][0]
       fixture.emit('agent/inbox/claimed', { message: a, turn: 1 })
-      wire.liveEvent?.(delegation('B', 'second question'))
+      wire.liveEvent?.(userTurn('B', 'second question'))
       const b = fixture.followup.mock.calls[1][0]
       if (action === 'discard-before') fixture.emit('agent/inbox/discarded', { message: b })
       fixture.pushAndEmit(assistantEvent(1, 1, 'original answer'))
       end(fixture, 1)
       await flush()
-      expect(payload('A')).toContain('original answer')
-      expect(payload('B')).not.toContain('original answer')
+      await finishSpeech()
+      expect(payload()).toContain('original answer')
       expect(latest(events, 'A')).toMatchObject({ receipt: { status: 'replied' } })
       if (action === 'finish') {
         expect(latest(events, 'B')).toMatchObject({ receipt: { status: 'queued' } })
@@ -150,61 +309,58 @@ describe("LiveVoice topic-switch and multi-turn delegation scenarios", () => {
         fixture.pushAndEmit(assistantEvent(2, 1, 'second answer'))
         end(fixture, 2)
         await flush()
-        expect(payload('B')).toContain('second answer')
-        expect(payload('A')).not.toContain('second answer')
+        expect(speech()).toEqual(['original answer', 'second answer'])
+        expect(latest(events, 'B')).toMatchObject({ receipt: { status: 'replied' } })
       } else {
         if (action === 'discard-after') fixture.emit('agent/inbox/discarded', { message: b })
         await flush()
-        expect(payload('B')).toContain('"status":"discarded"')
+        expect(speech()).toEqual(action === 'discard-before'
+          ? ['The request was discarded.', 'original answer']
+          : ['original answer', 'The request was discarded.'])
         expect(latest(events, 'B')).toMatchObject({ receipt: { status: 'discarded' } })
       }
       expect(events.filter(event => event.type === 'phase').at(-1)).toMatchObject({ phase: 'listening' })
+      expect(wire.sentMessages.every(message => message.type === 'session.context.append')).toBe(true)
     })
   })
 
-  it('returns a labeled shared answer and truthful settled state to both requests', async () => {
+  it('reads a shared answer once as plain text and settles both UI receipts', async () => {
     await scenario(async (fixture, events) => {
       for (const [index, id] of ['A', 'B'].entries()) {
-        wire.liveEvent?.(delegation(id, `question ${id}`))
+        wire.liveEvent?.(userTurn(id, 'question ' + id))
         fixture.emit('agent/inbox/claimed', { message: fixture.followup.mock.calls[index][0], turn: 1 })
       }
       fixture.pushAndEmit(assistantEvent(1, 1, 'combined answer'))
       end(fixture, 1)
       await flush()
+      expect(payload()).toBe('combined answer')
       for (const id of ['A', 'B']) {
-        expect(payload(id)).toContain('Shared worker response')
-        expect(payload(id)).toContain('combined answer')
-        expect(payload(id, true)).toContain('"active":[]')
         expect(latest(events, id)).toMatchObject({ receipt: { status: 'replied' } })
       }
     })
   })
 
   it.each([
-    [{ kind: 'aborted' }, 'cancelled'],
-    [{ kind: 'blocked' }, 'blocked'],
-    [{ kind: 'interrupted' }, 'interrupted'],
-    [{ kind: 'max-tokens' }, 'max-tokens'],
-    [{ kind: 'error', error: { message: 'fixture failed', code: 'FIXTURE' } }, 'failed'],
-  ] as [EndReason, string][])('reports %s despite earlier ordinary text', async (reason, status) => {
+    [{ kind: 'aborted' }, 'cancelled', 'The request was cancelled.'],
+    [{ kind: 'blocked' }, 'blocked', 'The request was blocked.'],
+    [{ kind: 'interrupted' }, 'interrupted', 'The response was interrupted.'],
+    [{ kind: 'max-tokens' }, 'max-tokens', 'The response reached its token limit.'],
+    [{ kind: 'error', error: { message: 'fixture failed', code: 'FIXTURE' } }, 'failed', 'The request failed: fixture failed'],
+  ] as [EndReason, string, string][])('reports %s despite earlier ordinary text', async (reason, status, notice) => {
     await scenario(async (fixture, events) => {
-      wire.liveEvent?.(delegation('A', 'question'))
+      wire.liveEvent?.(userTurn('A', 'question'))
       fixture.emit('agent/inbox/claimed', { message: fixture.followup.mock.calls[0][0], turn: 1 })
       fixture.pushAndEmit(assistantEvent(1, 1, 'partial result'))
       end(fixture, 1, reason)
       await flush()
-      expect(payload('A')).toContain('Partial worker response')
-      expect(payload('A')).toContain('partial result')
-      expect(payload('A')).not.toContain('"Agent Final Message"')
-      expect(payload('A')).toContain(`"status":"${status}"`)
-      expect(payload('A')).toContain('No tracked worker requests remain active')
+      expect(payload()).toBe(notice + '\n\npartial result')
       expect(latest(events, 'A')).toMatchObject({ receipt: { status } })
     })
   })
 
-  it('does not treat tool commentary as an answer and reports no-reply to Live', async () => {
+  it('does not treat tool commentary as an answer and reports no-reply', async () => {
     await scenario(async (fixture, events) => {
-      wire.liveEvent?.(delegation('A', 'question'))
+      wire.liveEvent?.(userTurn('A', 'question'))
       fixture.emit('agent/inbox/claimed', { message: fixture.followup.mock.calls[0][0], turn: 1 })
       const event = assistantEvent(1, 1, 'searching')
       if (event.type !== 'assistant/message') throw new Error('fixture')
@@ -217,18 +373,15 @@ describe("LiveVoice topic-switch and multi-turn delegation scenarios", () => {
       }) } })
       end(fixture, 1)
       await flush()
-      expect(payload('A')).not.toContain('searching')
-      expect(payload('A')).toContain('"status":"no-reply"')
+      expect(payload()).toBe('The backend returned no text.')
+      expect(payload(true)).toContain('searching')
       expect(latest(events, 'A')).toMatchObject({ receipt: { status: 'no-reply' } })
     })
   })
 
   it('ignores unrelated events and replay without losing multiple answers', async () => {
-    await scenario(async (fixture) => {
-      const request = delegation('A', 'question')
-      wire.liveEvent?.(request)
-      wire.liveEvent?.(request)
-      expect(fixture.followup).toHaveBeenCalledOnce()
+    await scenario(async fixture => {
+      wire.liveEvent?.(userTurn('A', 'question'))
       fixture.emit('agent/inbox/claimed', { message: createUserMessage({ content: [] }), turn: 7 })
       fixture.pushAndEmit(assistantEvent(7, 1, 'unrelated'))
       end(fixture, 7)
@@ -239,131 +392,93 @@ describe("LiveVoice topic-switch and multi-turn delegation scenarios", () => {
       fixture.pushAndEmit(assistantEvent(1, 2, 'second answer'))
       end(fixture, 1)
       await flush()
-      const before = payload('A')
+      expect(payload()).toBe('first answer\n\nsecond answer')
       end(fixture, 1)
       await flush()
-      expect(payload('A')).toBe(before)
-      expect(before).not.toContain('unrelated')
-      expect(before.match(/first answer/g)).toHaveLength(1)
-      expect(before).toContain('first answer\n\nsecond answer')
+      expect(payload()).toBe('first answer\n\nsecond answer')
     })
   })
 
-  it('sends tracking-stopped before closing, without claiming worker cancellation', async () => {
+  it('keeps tracking-stopped in the UI without injecting shutdown instructions into voice', async () => {
     await scenario(async (fixture, events, close) => {
-      wire.liveEvent?.(delegation('A', 'question'))
+      wire.liveEvent?.(userTurn('A', 'question'))
       fixture.emit('agent/inbox/claimed', { message: fixture.followup.mock.calls[0][0], turn: 1 })
       await close()
-      expect(payload('A')).toContain('"status":"tracking-stopped"')
-      expect(payload('A')).toContain('DSH work may continue')
+      expect(payload(true)).toBe('')
       expect(latest(events, 'A')).toMatchObject({ receipt: { status: 'tracking-stopped' } })
     })
   })
 
-  it("A-only scenario passes", async () => {
-    const fixture = fixtureAgent()
-    const registry = new LiveCallRegistry(
-      () => fixture.agent,
-      async () => ({} as CodexAccess),
-      {} as LiveProxy,
-    )
-    const call = await registry.start({ sessionId: "fixture-session", offer: "fixture-offer" })
-    const events: LiveUiEvent[] = []
-    call.subscribe(event => events.push(event))
-
-    try {
-      wire.liveEvent?.(delegation("del-A", "Request A"))
-      const msgA = fixture.followup.mock.calls[0]?.[0]
-      expect(msgA).toBeDefined()
-
-      fixture.emit("agent/inbox/claimed", { message: msgA, turn: 1 })
-      fixture.pushAndEmit(assistantEvent(1, 1, "Answer A"))
-      fixture.pushAndEmit({
-        type: "turn/end",
-        seq: 102,
-        time: 102,
-        data: { turn: 1, reason: { kind: "completed" } },
-      } satisfies SessionEvent)
+  it('passes the complete backend answer as bounded session context chunks', async () => {
+    await scenario(async fixture => {
+      wire.liveEvent?.(userTurn('A', '詳しく教えて'))
+      fixture.emit('agent/inbox/claimed', { message: fixture.followup.mock.calls[0][0], turn: 1 })
       await flush()
-
-      const finalMessages = wire.sentMessages.filter(
-        (m): m is Extract<LiveClientMessage, { type: "delegation.context.append" }> =>
-          m.type === "delegation.context.append" && m.channel === 'speakable' && m.content.some(c => c.text.includes("Answer A"))
-      )
-      expect(finalMessages.length).toBeGreaterThan(0)
-      expect(finalMessages.every(m => m.delegation_item_id === "del-A")).toBe(true)
-
-      const receipts = events.filter(e => e.type === "task-receipt" && e.receipt.id === "del-A")
-      expect(receipts.at(-1)?.receipt.status).toBe("replied")
-    } finally {
-      await call.close()
-    }
+      expect(payload(true)).toBe('')
+      const answer = '説明です。\n\n' + 'この段落を省略せずに読み上げます。'.repeat(500)
+        + '\n\n1. 条件は A です。\n2. 次に B を確認します。'
+      fixture.pushAndEmit(assistantEvent(1, 1, answer))
+      end(fixture, 1)
+      await flush()
+      expect(payload()).toBe(answer)
+      expect(speakableCues()).toHaveLength(1)
+      expect(wire.sentMessages.every(message => !('content' in message)
+        || message.content.every(block => Buffer.byteLength(block.text) <= 500))).toBe(true)
+      const cue = wire.sentMessages.at(-1)
+      expect(cue).toMatchObject({ type: 'session.context.append', channel: 'speakable' })
+      expect(wire.sentMessages.slice(0, -1).every(message => message.type === 'session.context.append'
+        && message.channel === 'commentary')).toBe(true)
+      expect(wire.sentMessages.every(message => message.type === 'session.context.append')).toBe(true)
+    })
   })
 
-  it("A reply followed by B reply in same turn preserves both answers and routes them to correct IDs", async () => {
-    const fixture = fixtureAgent()
-    const registry = new LiveCallRegistry(
-      () => fixture.agent,
-      async () => ({} as CodexAccess),
-      {} as LiveProxy,
-    )
-    const call = await registry.start({ sessionId: "fixture-session", offer: "fixture-offer" })
-    const events: LiveUiEvent[] = []
-    call.subscribe(event => events.push(event))
-
-    try {
-      // 1. delegate A
-      wire.liveEvent?.(delegation("del-A", "Request A"))
-      const msgA = fixture.followup.mock.calls[0]?.[0]
-
-      // 2. claim A in turn 1
-      fixture.emit("agent/inbox/claimed", { message: msgA, turn: 1 })
-
-      // 3. delegate B while A is running
-      wire.liveEvent?.(delegation("del-B", "Request B"))
-      const msgB = fixture.followup.mock.calls[1]?.[0]
-
-      // 4. step 1 answers A
-      fixture.pushAndEmit(assistantEvent(1, 1, "Answer A"))
-
-      // 5. claim B in turn 1 (before step 2)
-      fixture.emit("agent/inbox/claimed", { message: msgB, turn: 1 })
-
-      // 6. step 2 answers B
-      fixture.pushAndEmit(assistantEvent(1, 2, "Answer B"))
-
-      // 7. turn/end completed
-      fixture.pushAndEmit({
-        type: "turn/end",
-        seq: 103,
-        time: 103,
-        data: { turn: 1, reason: { kind: "completed" } },
-      } satisfies SessionEvent)
+  it('reads in backend response order when requests are claimed out of creation order', async () => {
+    await scenario(async fixture => {
+      wire.liveEvent?.(userTurn('A', 'question A'))
+      wire.liveEvent?.(userTurn('B', 'question B'))
+      fixture.emit('agent/inbox/claimed', { message: fixture.followup.mock.calls[1][0], turn: 1 })
+      fixture.pushAndEmit(assistantEvent(1, 1, 'First: B'))
+      fixture.emit('agent/inbox/claimed', { message: fixture.followup.mock.calls[0][0], turn: 1 })
+      fixture.pushAndEmit(assistantEvent(1, 2, 'Second: A'))
+      end(fixture, 1)
       await flush()
+      expect(speech()).toEqual(['First: B'])
+      await finishSpeech()
+      expect(speech()).toEqual(['First: B', 'Second: A'])
+    })
+  })
 
-      // Answer A must be delivered to del-A and NOT del-B
-      const answerAMessages = wire.sentMessages.filter(
-        (m): m is Extract<LiveClientMessage, { type: "delegation.context.append" }> =>
-          m.type === "delegation.context.append" && m.channel === 'speakable' && m.content.some(c => c.text.includes("Answer A"))
-      )
-      expect(answerAMessages.length).toBeGreaterThan(0)
-      expect(answerAMessages.every(m => m.delegation_item_id === "del-A")).toBe(true)
+  it('reads identical answers to separate turns instead of suppressing repeated words', async () => {
+    await scenario(async fixture => {
+      for (const [index, id] of ['A', 'B'].entries()) {
+        wire.liveEvent?.(userTurn(id, 'もう一度教えて'))
+        fixture.emit('agent/inbox/claimed', { message: fixture.followup.mock.calls[index][0], turn: index + 1 })
+        fixture.pushAndEmit(assistantEvent(index + 1, index + 1, 'はい。'))
+        end(fixture, index + 1)
+        await flush()
+        await finishSpeech()
+      }
+      expect(speech()).toEqual(['はい。', 'はい。'])
+    })
+  })
 
-      // Answer B must be delivered to del-B and NOT del-A
-      const answerBMessages = wire.sentMessages.filter(
-        (m): m is Extract<LiveClientMessage, { type: "delegation.context.append" }> =>
-          m.type === "delegation.context.append" && m.channel === 'speakable' && m.content.some(c => c.text.includes("Answer B"))
-      )
-      expect(answerBMessages.length).toBeGreaterThan(0)
-      expect(answerBMessages.every(m => m.delegation_item_id === "del-B")).toBe(true)
-
-      // Both receipts must be replied
-      const receiptA = events.filter(e => e.type === "task-receipt" && e.receipt.id === "del-A").at(-1)?.receipt
-      const receiptB = events.filter(e => e.type === "task-receipt" && e.receipt.id === "del-B").at(-1)?.receipt
-      expect(receiptA?.status).toBe("replied")
-      expect(receiptB?.status).toBe("replied")
-    } finally {
-      await call.close()
-    }
+  it('preserves sequential A and B replies in one backend turn with separate receipts', async () => {
+    await scenario(async (fixture, events) => {
+      wire.liveEvent?.(userTurn('A', 'Request A'))
+      fixture.emit('agent/inbox/claimed', { message: fixture.followup.mock.calls[0][0], turn: 1 })
+      wire.liveEvent?.(userTurn('B', 'Request B'))
+      fixture.pushAndEmit(assistantEvent(1, 1, 'Answer A'))
+      fixture.emit('agent/inbox/claimed', { message: fixture.followup.mock.calls[1][0], turn: 1 })
+      fixture.pushAndEmit(assistantEvent(1, 2, 'Answer B'))
+      end(fixture, 1)
+      await flush()
+      expect(speech()).toEqual(['Answer A'])
+      expect(speakableCues()).toHaveLength(1)
+      await finishSpeech()
+      expect(speech()).toEqual(['Answer A', 'Answer B'])
+      expect(speakableCues()).toHaveLength(2)
+      expect(latest(events, 'A')).toMatchObject({ receipt: { status: 'replied' } })
+      expect(latest(events, 'B')).toMatchObject({ receipt: { status: 'replied' } })
+    })
   })
 })

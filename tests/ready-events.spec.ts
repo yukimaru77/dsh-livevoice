@@ -36,7 +36,7 @@ describe('backend readiness is a distinct replayable proof', () => {
     try {
       const events: unknown[] = []
       live.subscribe(event => events.push(event))
-      expect(events).toEqual([{ type: 'phase', phase: 'connecting' }])
+      expect(events).toEqual([{ type: 'playback', enabled: false }, { type: 'phase', phase: 'connecting' }])
       wire.event?.({ type: 'session.started', session: { id: 'fixture-service' } })
       expect(events).toContainEqual({ type: 'ready' })
       expect(events).toContainEqual({ type: 'phase', phase: 'listening' })

@@ -357,6 +357,10 @@ export class LiveClientSession {
   }
 
   private handleEvent(event: LiveUiEvent): void {
+    if (event.type === 'playback') {
+      this.playback?.setEnabled(event.enabled)
+      return
+    }
     if (event.type === 'ready') {
       this.markSessionProofReady()
       return

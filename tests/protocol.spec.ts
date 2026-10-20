@@ -151,7 +151,7 @@ describe('Frameless Bidi client payloads', () => {
     expect(LIVE_MODEL).toBe('gpt-live-1-codex')
     expect(LIVE_EVENTS_CHANNEL).toBe('oai-events')
     expect(JSON.stringify(payload)).toBe(
-      '{"model":"gpt-live-1-codex","instructions":"Be concise.","audio":{"output":{"voice":"marin"}},"delegation":{"type":"client"}}',
+      '{"model":"gpt-live-1-codex","instructions":"Be concise.","audio":{"output":{"voice":"marin"}},"delegation":{"type":"client","ack_filler":false}}',
     )
   })
 

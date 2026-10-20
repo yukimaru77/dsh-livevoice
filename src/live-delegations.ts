@@ -4,7 +4,7 @@ type Entry = {
   liveId: string
   messageId: MessageId
   turn?: number
-  replies: string[]
+  replies: { seq: number; text: string }[]
   lastReply: number
 }
 
@@ -53,22 +53,30 @@ export class LiveDelegations {
     seen.add(seq)
     this.seenReplies.set(turn, seen)
     const number = ++this.replyNumber
-    // Several requests may be consumed by one model step. This is a shared
-    // response, not evidence that every individual request was fulfilled.
-    const response = audience.length > 1
-      ? `Shared worker response for requests ${audience.map(entry => entry.liveId).join(', ')}. Individual fulfillment is not verified.\n\n${text}`
-      : text
     for (const entry of audience) {
-      entry.replies.push(response)
+      entry.replies.push({ seq, text })
       entry.lastReply = number
     }
   }
 
-  end(turn: number): { liveId: string; text: string }[] {
-    const results: { liveId: string; text: string }[] = []
-    for (const entry of this.entries.values()) {
-      if (entry.turn !== turn) continue
-      results.push({ liveId: entry.liveId, text: entry.replies.join('\n\n') })
+  end(turn: number): { liveId: string; text: string; speechText: string }[] {
+    const results: { liveId: string; text: string; speechText: string }[] = []
+    const spoken = new Set<number>()
+    const entries = [...this.entries.values()].filter(entry => entry.turn === turn)
+      .sort((a, b) => (a.replies[0]?.seq ?? Infinity) - (b.replies[0]?.seq ?? Infinity))
+    for (const entry of entries) {
+      // Every request keeps its receipt, but a shared backend message is read
+      // only once. Deduplicate event IDs, never equal text from distinct replies.
+      const speech = entry.replies.filter(reply => {
+        if (spoken.has(reply.seq)) return false
+        spoken.add(reply.seq)
+        return true
+      })
+      results.push({
+        liveId: entry.liveId,
+        text: entry.replies.map(reply => reply.text).join('\n\n'),
+        speechText: speech.map(reply => reply.text).join('\n\n'),
+      })
       this.entries.delete(entry.liveId)
     }
     this.seenReplies.delete(turn)

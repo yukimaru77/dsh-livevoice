@@ -5,6 +5,7 @@ import type { LiveTranscript } from './transcript.js'
 
 export type LiveUiEvent =
   | { type: 'ready' }
+  | { type: 'playback'; enabled: boolean }
   | { type: 'phase'; phase: LivePhase }
   | { type: 'transcript'; transcript: LiveTranscript | undefined }
   | { type: 'task-receipt'; receipt: LiveTaskReceipt }

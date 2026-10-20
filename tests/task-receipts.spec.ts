@@ -66,21 +66,13 @@ function fixtureAgent() {
   }
 }
 
-function delegation(id: string, text: string): LiveServerEvent {
-  return {
-    type: 'delegation.created',
-    item: {
-      type: 'delegation',
-      target: 'client',
-      id,
-      content: [{ type: 'input_text', text }],
-    },
-  }
+function userTurn(id: string, text: string): LiveServerEvent {
+  return { type: 'turn.done', turn: { id, role: 'user', transcript: text } }
 }
 
 beforeEach(() => { wire.liveEvent = undefined })
 
-describe('delegation task receipt walking skeleton', () => {
+describe('ASR task receipt walking skeleton', () => {
   it('flows controller dispatch through replayable SSE events into client receipt state', async () => {
     const fixture = fixtureAgent()
     const registry = new LiveCallRegistry(
@@ -92,11 +84,11 @@ describe('delegation task receipt walking skeleton', () => {
     const events: LiveUiEvent[] = []
     call.subscribe(event => events.push(event))
     try {
-      wire.liveEvent?.(delegation('delegation-1', 'How would you optimize this without changing it?'))
+      wire.liveEvent?.(userTurn('delegation-1', 'How would you optimize this without changing it?'))
 
       expect(fixture.followup).toHaveBeenCalledOnce()
       const sent = fixture.followup.mock.calls[0]?.[0]
-      expect(sent.content[0].text).toContain('user: How would you optimize this without changing it?')
+      expect(sent.content[0].text).toBe('How would you optimize this without changing it?')
 
       const queued = events.find((event): event is Extract<LiveUiEvent, { type: 'task-receipt' }> =>
         event.type === 'task-receipt' && event.receipt.status === 'queued')
@@ -161,17 +153,17 @@ describe('delegation task receipt walking skeleton', () => {
     )
     const call = await registry.start({ sessionId: 'fixture-session', offer: 'fixture-offer' })
     try {
-      const first = delegation('same-id', 'Run tests')
+      const first = userTurn('same-id', 'Run tests')
       wire.liveEvent?.(first)
       wire.liveEvent?.(first)
-      wire.liveEvent?.(delegation('new-id', 'Run tests'))
+      wire.liveEvent?.(userTurn('new-id', 'Run tests'))
       expect(fixture.followup).toHaveBeenCalledTimes(2)
     } finally {
       await call.close()
     }
   })
 
-  it('includes the current unpresented user transcript when a fragment delegates before turn.done', async () => {
+  it('stores exact ASR and no added history in the replayable receipt', async () => {
     const fixture = fixtureAgent()
     const registry = new LiveCallRegistry(
       () => fixture.agent,
@@ -182,65 +174,22 @@ describe('delegation task receipt walking skeleton', () => {
     const events: LiveUiEvent[] = []
     call.subscribe(event => events.push(event))
     try {
-      wire.liveEvent?.({
-        type: 'input_transcript.added',
-        item: { text: '假如让你优化插件，你会怎么做' },
-      })
-      wire.liveEvent?.({
-        type: 'turn.created',
-        turn: { role: 'user', transcript: '假如让你优化插件，你会怎么做' },
-      })
-      // Assistant output auto-closes the current user bucket without presenting
-      // it into `spoken`; the handoff must still retain that user context.
-      wire.liveEvent?.({
-        type: 'output_transcript.added',
-        item: { text: '我先说思路。' },
-      })
-      wire.liveEvent?.(delegation('fragment', '就这个'))
-
-      const sent = fixture.followup.mock.calls[0]?.[0]
-      expect(sent.content[0].text).toContain('user: 就这个')
-      expect(sent.content[0].text).toContain('user: 假如让你优化插件，你会怎么做')
+      wire.liveEvent?.(userTurn('previous', '以前の質問です'))
+      const current = '  今回の発話です。\n' + '続き'.repeat(4_000) + '  '
+      wire.liveEvent?.({ type: 'input_transcript.added', item: { text: current } })
+      expect(fixture.followup).toHaveBeenCalledOnce()
+      wire.liveEvent?.(userTurn('current', current))
+      expect(fixture.followup.mock.calls[1][0].content[0].text).toBe(current)
       expect(events).toContainEqual({
         type: 'task-receipt',
         receipt: expect.objectContaining({
-          id: 'fragment',
-          input: '就这个',
-          context: [{ role: 'user', text: '假如让你优化插件，你会怎么做' }],
+          id: 'current',
+          input: current,
+          handoff: current,
+          context: [],
+          requestKind: 'additional',
         }),
       })
-    } finally {
-      await call.close()
-    }
-  })
-
-  it('keeps a 5999-character current user context intact without exceeding the 6000-character cap', async () => {
-    const fixture = fixtureAgent()
-    const registry = new LiveCallRegistry(
-      () => fixture.agent,
-      async () => ({} as CodexAccess),
-      {} as LiveProxy,
-    )
-    const call = await registry.start({ sessionId: 'fixture-session', offer: 'fixture-offer' })
-    const events: LiveUiEvent[] = []
-    call.subscribe(event => events.push(event))
-    try {
-      wire.liveEvent?.({
-        type: 'turn.done',
-        turn: { role: 'user', transcript: 'p'.repeat(200) },
-      })
-      const current = 'c'.repeat(5_999)
-      wire.liveEvent?.({ type: 'input_transcript.added', item: { text: current } })
-      wire.liveEvent?.(delegation('context-cap', '现在优化'))
-
-      const receiptEvent = events.find((event): event is Extract<LiveUiEvent, { type: 'task-receipt' }> =>
-        event.type === 'task-receipt' && event.receipt.id === 'context-cap')
-      if (!receiptEvent) throw new Error('expected capped context receipt')
-      expect(receiptEvent.receipt.input).toBe('现在优化')
-      expect(receiptEvent.receipt.context.at(-1)?.text).toBe(current)
-      expect(receiptEvent.receipt.context.map(line => line.text.length).reduce((sum, length) => sum + length, 0))
-        .toBeLessThanOrEqual(6_000)
-      expect(receiptEvent.receipt.context[0]?.text).toBe('…')
     } finally {
       await call.close()
     }
@@ -257,7 +206,7 @@ describe('delegation task receipt walking skeleton', () => {
     const events: LiveUiEvent[] = []
     call.subscribe(event => events.push(event))
     try {
-      wire.liveEvent?.(delegation('no-reply', 'Check status'))
+      wire.liveEvent?.(userTurn('no-reply', 'Check status'))
       const sent = fixture.followup.mock.calls[0]?.[0]
       fixture.emit('agent/inbox/claimed', { message: sent, turn: 8 })
       fixture.emit('session/event', fixture.session, {
@@ -289,7 +238,7 @@ describe('delegation task receipt walking skeleton', () => {
       fixture.followup.mockImplementationOnce(message => {
         fixture.emit('agent/inbox/claimed', { message, turn: 9 })
       })
-      wire.liveEvent?.(delegation('sync-claimed', 'Inspect the state'))
+      wire.liveEvent?.(userTurn('sync-claimed', 'Inspect the state'))
       const claimedStatuses = events
         .filter((event): event is Extract<LiveUiEvent, { type: 'task-receipt' }> =>
           event.type === 'task-receipt' && event.receipt.id === 'sync-claimed')
@@ -299,7 +248,7 @@ describe('delegation task receipt walking skeleton', () => {
       fixture.followup.mockImplementationOnce(message => {
         fixture.emit('agent/inbox/discarded', { message })
       })
-      wire.liveEvent?.(delegation('sync-discarded', 'Inspect the state again'))
+      wire.liveEvent?.(userTurn('sync-discarded', 'Inspect the state again'))
       const discardedStatuses = events
         .filter((event): event is Extract<LiveUiEvent, { type: 'task-receipt' }> =>
           event.type === 'task-receipt' && event.receipt.id === 'sync-discarded')
@@ -324,7 +273,7 @@ describe('delegation task receipt walking skeleton', () => {
     const events: LiveUiEvent[] = []
     call.subscribe(event => events.push(event))
     try {
-      wire.liveEvent?.(delegation('failed-turn', 'Inspect the failure'))
+      wire.liveEvent?.(userTurn('failed-turn', 'Inspect the failure'))
       const sent = fixture.followup.mock.calls[0]?.[0]
       fixture.emit('agent/inbox/claimed', { message: sent, turn: 10 })
       fixture.events.push({

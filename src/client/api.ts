@@ -139,6 +139,7 @@ export function subscribeLiveEvents(
   }
   source.addEventListener('phase', handle)
   source.addEventListener('ready', handle)
+  source.addEventListener('playback', handle)
   source.addEventListener('transcript', handle)
   source.addEventListener('task-receipt', handle)
   source.addEventListener('usage', handle)
