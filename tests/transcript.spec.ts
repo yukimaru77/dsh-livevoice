@@ -136,4 +136,56 @@ describe('live transcript assembly', () => {
     state = ingest(state, { type: 'input_transcript.added', item: { text: ' stop' } }).state
     expect(state.user.text).toBe('wait stop')
   })
+
+  it('opens an empty new user turn during assistant speech and accepts its fragments', () => {
+    let state = emptyTranscriptState()
+    state = ingest(state, { type: 'turn.created', turn: { id: 'u1', role: 'user', transcript: 'Aかな' } }).state
+    state = ingest(state, { type: 'turn.done', turn: { id: 'u1', role: 'user', transcript: 'Aかな' } }).state
+    state = ingest(state, { type: 'output_transcript.added', item: { text: '回答します' } }).state
+    state = ingest(state, { type: 'turn.created', turn: { id: 'u2', role: 'user', transcript: '' } }).state
+    expect(state.user).toMatchObject({ text: '', turn: 2, final: false })
+
+    state = ingest(state, { type: 'input_transcript.added', item: { text: '次は' } }).state
+    state = ingest(state, { type: 'turn.delta', turn_id: 'u2', delta: 'Bで' }).state
+    expect(state.user).toMatchObject({ text: '次はBで', turn: 2, final: false })
+    state = ingest(state, { type: 'turn.delta', turn_id: 'u1', delta: '古い発話の末尾' }).state
+    expect(state.user.text).toBe('次はBで')
+    expect(state.assistant.text).toBe('回答します')
+
+    const done = ingest(state, { type: 'turn.done', turn: { id: 'u2', role: 'user', transcript: '次はBで' } })
+    expect(done.state.user).toMatchObject({ text: '次はBで', turn: 2, final: true })
+    expect(done.finals).toEqual(['user:次はBで'])
+  })
+
+  it('preserves ASR that arrives before an empty created snapshot and ignores duplicate starts', () => {
+    let state = emptyTranscriptState()
+    state = ingest(state, { type: 'input_transcript.added', item: { text: '次は' } }).state
+    const created = { type: 'turn.created', turn: { id: 'u1', role: 'user', transcript: '' } }
+    state = ingest(state, created).state
+    expect(state.user).toMatchObject({ text: '次は', turn: 1, final: false })
+    state = ingest(state, { type: 'turn.delta', turn_id: 'u1', delta: 'Bで' }).state
+    state = ingest(state, created).state
+    expect(state.user).toMatchObject({ text: '次はBで', turn: 1, final: false })
+
+    state = ingest(state, { type: 'turn.done', turn: { id: 'u1', role: 'user', transcript: '次はBで' } }).state
+    state = ingest(state, created).state
+    state = ingest(state, { type: 'turn.created', turn: { id: 'u1', role: 'user', transcript: '次は' } }).state
+    expect(state.user).toMatchObject({ text: '次はBで', turn: 1, final: true })
+
+    state = ingest(state, { type: 'input_transcript.added', item: { text: 'その次は' } }).state
+    state = ingest(state, { type: 'turn.created', turn: { id: 'u2', role: 'user', transcript: '' } }).state
+    expect(state.user).toMatchObject({ text: 'その次は', turn: 2, final: false })
+  })
+
+  it('keeps the same words in different upstream turns as distinct utterances', () => {
+    let state = emptyTranscriptState()
+    for (const [index, id] of ['u1', 'u2'].entries()) {
+      state = ingest(state, { type: 'turn.created', turn: { id, role: 'user', transcript: '' } }).state
+      state = ingest(state, { type: 'input_transcript.added', item: { text: 'もう一度' } }).state
+      const done = ingest(state, { type: 'turn.done', turn: { id, role: 'user', transcript: 'もう一度' } })
+      state = done.state
+      expect(state.user).toMatchObject({ text: 'もう一度', turn: index + 1, final: true })
+      expect(done.finals).toEqual(['user:もう一度'])
+    }
+  })
 })

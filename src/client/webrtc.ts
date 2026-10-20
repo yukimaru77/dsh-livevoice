@@ -22,12 +22,16 @@ export interface LivePeer {
 export async function createLivePeer(options: {
   onRemoteStream(stream: MediaStream): void
   onIceState(state: string): void
+  onMicrophoneEnded?(): void
   onControlPayload?(payload: string): void
   signal?: AbortSignal
 }): Promise<{ peer: LivePeer; offer: string }> {
   const localStream = await captureMicrophone(options.signal)
   let pc: RTCPeerConnection | undefined
+  let stopCaptureWatch: (() => void) | undefined
   const dispose = (): void => {
+    stopCaptureWatch?.()
+    stopCaptureWatch = undefined
     localStream.getTracks().forEach(track => track.stop())
     pc?.close()
   }
@@ -37,6 +41,11 @@ export async function createLivePeer(options: {
     dispose()
     throw new Error('Microphone track is missing')
   }
+  // Device removal can end capture while ICE remains connected. A temporary
+  // track mute is recoverable, so only a permanent end terminates the call.
+  const onCaptureEnded = (): void => { options.onMicrophoneEnded?.() }
+  audioTrack.addEventListener('ended', onCaptureEnded, { once: true })
+  stopCaptureWatch = () => audioTrack.removeEventListener('ended', onCaptureEnded)
   let captureLabel: string
   try {
     captureLabel = await waitForMicCapture(audioTrack, options.signal)
@@ -98,8 +107,7 @@ export async function createLivePeer(options: {
   }
   const sdp = peerConnection.localDescription?.sdp
   if (!sdp || !sdp.includes('m=audio') || !sdp.includes('m=application')) {
-    peerConnection.close()
-    localStream.getTracks().forEach(track => track.stop())
+    dispose()
     throw new Error('WebRTC produced an offer without audio or the oai-events data channel')
   }
   return {
@@ -117,8 +125,7 @@ export async function createLivePeer(options: {
       },
       close() {
         eventsChannel.close()
-        localStream.getTracks().forEach(track => track.stop())
-        peerConnection.close()
+        dispose()
       },
     },
   }

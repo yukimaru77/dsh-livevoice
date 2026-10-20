@@ -155,6 +155,62 @@ beforeEach(() => {
 })
 
 describe('LiveVoice direct ASR and backend readout', () => {
+  it('uses delegation only as a boundary when upstream never sends user turn.done', async () => {
+    vi.useFakeTimers()
+    try {
+      await scenario(async (fixture, events) => {
+        wire.liveEvent?.({ type: 'input_transcript.added', item: { text: 'すごく' } })
+        wire.liveEvent?.({ type: 'turn.created', turn: { id: 'user-stalled', role: 'user', transcript: 'すごく' } })
+        wire.liveEvent?.({ type: 'input_transcript.added', item: { text: 'すごく困っています' } })
+        wire.liveEvent?.({ type: 'turn.delta', turnId: 'user-stalled', delta: 'すごく困っています' })
+        wire.liveEvent?.(modelDelegation('model-summary', 'Rewrite the application immediately'))
+        await vi.advanceTimersByTimeAsync(500)
+        expect(fixture.followup).not.toHaveBeenCalled()
+        wire.liveEvent?.({ type: 'input_transcript.added', item: { text: '。まだ変更しないで。' } })
+        wire.liveEvent?.({ type: 'turn.delta', turnId: 'user-stalled', delta: '。まだ変更しないで。' })
+        await vi.advanceTimersByTimeAsync(750)
+        const exact = 'すごくすごく困っています。まだ変更しないで。'
+        expect(fixture.followup).toHaveBeenCalledOnce()
+        expect(fixture.followup.mock.calls[0][0].content).toEqual([{ type: 'text', text: exact }])
+        expect(latest(events, 'user-stalled')).toMatchObject({ receipt: { input: exact, handoff: exact } })
+        wire.liveEvent?.(userTurn('user-stalled', exact))
+        wire.liveEvent?.(modelDelegation('replayed-model-summary', 'Different interpretation'))
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(fixture.followup).toHaveBeenCalledOnce()
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not dispatch generated delegation text without ASR or after the call closes', async () => {
+    vi.useFakeTimers()
+    try {
+      await scenario(async (fixture, _events, close) => {
+        wire.liveEvent?.(modelDelegation('invented', 'Run tests'))
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(fixture.followup).not.toHaveBeenCalled()
+        wire.liveEvent?.({ type: 'turn.created', turn: { id: 'pending', role: 'user', transcript: '調べて' } })
+        wire.liveEvent?.(modelDelegation('pending-handoff', 'Investigate'))
+        await close()
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(fixture.followup).not.toHaveBeenCalled()
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('uses captured ASR when the current user turn ends with an empty transcript', async () => {
+    await scenario(async fixture => {
+      wire.liveEvent?.({ type: 'turn.created', turn: { id: 'empty-final', role: 'user', transcript: '' } })
+      wire.liveEvent?.({ type: 'input_transcript.added', item: { text: '確認してください' } })
+      wire.liveEvent?.(userTurn('empty-final', ''))
+      expect(fixture.followup).toHaveBeenCalledOnce()
+      expect(fixture.followup.mock.calls[0][0].content).toEqual([{ type: 'text', text: '確認してください' }])
+    })
+  })
+
   it('mutes autonomous replies and waits for their actual final before enabling backend readout', async () => {
     await scenario(async (fixture, events, _close, subscribe) => {
       expect(events).toContainEqual({ type: 'playback', enabled: false })

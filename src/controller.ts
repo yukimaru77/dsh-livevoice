@@ -25,6 +25,7 @@ import {
   type LiveServerEvent,
   type LiveUsageMetric,
   type LiveUsageSource,
+  type LiveTurn,
 } from './protocol.js'
 import {
   emptyTranscriptState,
@@ -41,6 +42,7 @@ import { hasToolCalls, textFromBlocks } from './text.js'
 import { resolveLiveVoice } from './voices.js'
 import { LiveTaskReceiptLog, type LiveTaskReceipt } from './receipts.js'
 import { buildReadoutMessages } from './readout.js'
+import { LiveInputBuffer, type LiveInputSource } from './input.js'
 
 export type { LiveUiEvent }
 
@@ -51,6 +53,7 @@ export interface LiveCallHandle {
   readonly voice: string
   readonly sessionId: string
   subscribe(listener: (event: LiveUiEvent) => void): () => void
+  setInputActivity(sequence: number, speaking: boolean): void
   close(): Promise<void>
 }
 
@@ -124,6 +127,7 @@ export class LiveCallRegistry {
       voice,
       sessionId: input.sessionId,
       subscribe: listener => session.subscribe(listener),
+      setInputActivity: (sequence, speaking) => session.setInputActivity(sequence, speaking),
       close: async () => {
         this.calls.delete(callToken)
         await session.close()
@@ -141,6 +145,7 @@ export class LiveCallRegistry {
       voice: session.voice,
       sessionId: session.sessionId,
       subscribe: listener => session.subscribe(listener),
+      setInputActivity: (sequence, speaking) => session.setInputActivity(sequence, speaking),
       close: async () => {
         this.calls.delete(callToken)
         await session.close()
@@ -190,10 +195,7 @@ class LiveCallSession {
   private lastTranscript: LiveTranscript | undefined
   private lastUsage: { source: LiveUsageSource; metrics: readonly LiveUsageMetric[] } | undefined
   private readonly receiptLog = new LiveTaskReceiptLog()
-  private readonly seenUserTurnIds = new Set<string>()
-  private userSpeechOpen = false
-  private userSpeechGeneration = 0
-  private lastUnkeyedInput: { generation: number; text: string } | undefined
+  private readonly inputs = new LiveInputBuffer((turn, source) => this.handleUserTurn(turn, source))
   private playbackEnabled = false
   private assistantSpeaking = false
   private readoutInFlight = false
@@ -281,6 +283,7 @@ class LiveCallSession {
   async close(): Promise<void> {
     if (this.closed || this.closing) return
     this.closing = true
+    this.inputs.close()
     this.readoutQueue.length = 0
     this.readoutInFlight = false
     this.setPlayback(false)
@@ -308,6 +311,7 @@ class LiveCallSession {
         this.mark('first-asr')
         if (event.item.text.trim()) this.noteUserSpeech()
         this.applyTranscript(event)
+        this.inputs.ingest(event)
         break
       case 'output_transcript.added':
         this.mark('first-tts')
@@ -315,21 +319,31 @@ class LiveCallSession {
         this.applyTranscript(event)
         break
       case 'turn.created':
-        if (event.turn.role === 'user') this.noteUserSpeech()
+        if (event.turn.role === 'user') {
+          this.noteUserSpeech()
+        }
         else if (event.turn.id === undefined || !this.seenAssistantTurnIds.has(event.turn.id)) this.noteAssistantSpeech()
         this.applyTranscript(event)
+        this.inputs.ingest(event)
         break
       case 'turn.delta':
         this.applyTranscript(event)
+        this.inputs.ingest(event)
         break
       case 'turn.done':
-        this.applyTranscript(event)
-        if (event.turn.role === 'user') this.handleUserTurn(event.turn)
-        else this.finishAssistantTurn(event.turn)
+        if (event.turn.role === 'user') {
+          this.applyTranscript(event)
+          this.inputs.ingest(event)
+        } else {
+          this.applyTranscript(event)
+          this.finishAssistantTurn(event.turn)
+        }
         break
       case 'delegation.created':
-        // Requests are dispatched from final ASR, never from the voice model's
-        // interpretation. A generated delegation must not execute them twice.
+        // Frameless Bidi may wait for a backend response without emitting a
+        // user turn.done. This is a boundary signal, never the input text:
+        // discard the model-written item.content and send the original ASR.
+        this.inputs.ingest(event)
         break
       case 'session.usage.updated':
       case 'rate_limits.updated':
@@ -360,28 +374,23 @@ class LiveCallSession {
 
   private noteUserSpeech(): void {
     this.setPlayback(false)
-    if (this.userSpeechOpen) return
-    this.userSpeechOpen = true
-    this.userSpeechGeneration += 1
   }
 
-  private handleUserTurn(turn: Extract<LiveServerEvent, { type: 'turn.done' }>['turn']): void {
+  setInputActivity(sequence: number, speaking: boolean): void {
+    if (this.closed || this.closing) return
+    this.inputs.setActivity(sequence, speaking)
+  }
+
+  private handleUserTurn(turn: LiveTurn, source: LiveInputSource): void {
     const input = turn.transcript
     if (!input.trim()) return
-    if (turn.id !== undefined) {
-      if (this.seenUserTurnIds.has(turn.id)) return
-      this.seenUserTurnIds.add(turn.id)
-    } else if (this.lastUnkeyedInput?.generation === this.userSpeechGeneration
-      && this.lastUnkeyedInput.text === input) {
-      // Without an upstream ID, an identical final without fresh speech is a
-      // replay. New speech activity allows the same words to be spoken again.
-      return
-    }
     this.setPlayback(false)
-    this.userSpeechOpen = false
-    this.lastUnkeyedInput = { generation: this.userSpeechGeneration, text: input }
+    if (source !== 'final') {
+      try { presentFinalTranscript(this.agent.session, { role: 'user', text: input }) } catch {}
+    }
     const liveId = turn.id ?? `asr-${crypto.randomUUID()}`
     this.mark('asr-dispatch')
+    console.log(`[dsh-livevoice] ${new Date().toISOString()} call=${this.callId.slice(-8)} input=${liveId} source=${source} chars=${input.length}`)
     const message = createUserMessage({
       content: [{ type: 'text', text: input }],
       source: { kind: PLUGIN_ID },

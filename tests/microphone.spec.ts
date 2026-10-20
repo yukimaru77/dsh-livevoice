@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { enclosingMacApp, missingAudioEntitlement } from '../src/microphone-host.js'
-import { captureMicrophone } from '../src/client/webrtc.js'
+import { captureMicrophone, createLivePeer } from '../src/client/webrtc.js'
 import { MicrophoneAccessError } from '../src/client/microphone-error.js'
 import { testMicrophone } from '../src/client/MicrophoneRecovery.js'
 
@@ -49,4 +49,71 @@ it('stops late microphone capture after the permission view is dismissed', async
   capture.resolve({ getTracks: () => [{ stop }] } as unknown as MediaStream)
   await Promise.resolve(); await Promise.resolve()
   expect(stop).toHaveBeenCalledOnce()
+})
+
+function peerCapture() {
+  class Track extends EventTarget {
+    readyState = 'live'
+    muted = false
+    enabled = true
+    label = 'fixture microphone'
+    getSettings() { return {} }
+    stop = vi.fn(() => { this.readyState = 'ended' })
+  }
+  const track = new Track()
+  media(vi.fn().mockResolvedValue({ getTracks: () => [track], getAudioTracks: () => [track] }))
+  const channelClose = vi.fn()
+  const peerClose = vi.fn()
+  class Peer extends EventTarget {
+    iceGatheringState = 'complete'
+    localDescription: RTCSessionDescriptionInit | undefined
+    createDataChannel() { return Object.assign(new EventTarget(), { close: channelClose }) }
+    addTransceiver() { return {} }
+    async createOffer() { return { type: 'offer' as const, sdp: 'v=0\r\nm=audio 9 RTP/AVP 111\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n' } }
+    async setLocalDescription(value: RTCSessionDescriptionInit) { this.localDescription = value }
+    close = peerClose
+  }
+  vi.stubGlobal('RTCPeerConnection', Peer)
+  vi.stubGlobal('RTCRtpSender', {})
+  return { track, channelClose, peerClose }
+}
+
+it('reports permanent microphone loss but tolerates temporary track muting', async () => {
+  const { track } = peerCapture()
+  const onMicrophoneEnded = vi.fn()
+  const { peer } = await createLivePeer({
+    onRemoteStream: vi.fn(), onIceState: vi.fn(), onMicrophoneEnded,
+  })
+  track.muted = true
+  track.dispatchEvent(new Event('mute'))
+  track.muted = false
+  track.dispatchEvent(new Event('unmute'))
+  expect(onMicrophoneEnded).not.toHaveBeenCalled()
+  expect(peer.isMicrophoneUsable()).toBe(true)
+
+  // Device removal emits ended; calling track.stop() ourselves does not.
+  track.readyState = 'ended'
+  track.dispatchEvent(new Event('ended'))
+  expect(onMicrophoneEnded).toHaveBeenCalledOnce()
+  expect(peer.isMicrophoneUsable()).toBe(false)
+  peer.close()
+})
+
+it('removes the capture listener before local shutdown and does not report stale ended events', async () => {
+  const { track, channelClose, peerClose } = peerCapture()
+  const onMicrophoneEnded = vi.fn()
+  const { peer } = await createLivePeer({
+    onRemoteStream: vi.fn(), onIceState: vi.fn(), onMicrophoneEnded,
+  })
+  // Exercise cleanup ordering even if a platform queues an ended event during stop.
+  track.stop.mockImplementation(() => {
+    track.readyState = 'ended'
+    track.dispatchEvent(new Event('ended'))
+  })
+  peer.close()
+  track.dispatchEvent(new Event('ended'))
+  expect(onMicrophoneEnded).not.toHaveBeenCalled()
+  expect(channelClose).toHaveBeenCalledOnce()
+  expect(track.stop).toHaveBeenCalledOnce()
+  expect(peerClose).toHaveBeenCalledOnce()
 })

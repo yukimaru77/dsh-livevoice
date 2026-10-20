@@ -2,6 +2,7 @@ import type { LiveUiEvent } from '../events.js'
 import {
   LIVE_CALLS_PATH,
   LIVE_EVENTS_PATH,
+  LIVE_INPUT_ACTIVITY_PATH,
   LIVE_STATUS_PATH,
   LIVE_STOP_PATH,
 } from '../ids.js'
@@ -107,6 +108,18 @@ export async function stopLiveCall(callToken: string): Promise<void> {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ callToken }),
   }))
+}
+
+export async function sendLiveInputActivity(
+  callToken: string,
+  sequence: number,
+  speaking: boolean,
+): Promise<void> {
+  await readJson(await fetchWithTimeout(LIVE_INPUT_ACTIVITY_PATH, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ callToken, sequence, speaking }),
+  }, 5_000))
 }
 
 export function subscribeLiveEvents(

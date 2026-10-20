@@ -53,6 +53,7 @@ export type LiveServerEvent =
       type: 'delegation'
       target: 'client'
       id: string
+      userTurnId?: string
       content: LiveInputTextContent[]
     }
   }
@@ -161,7 +162,11 @@ function parseDelegationCreatedEvent(payload: UnknownRecord): LiveServerEvent | 
   }
   return {
     type: 'delegation.created',
-    item: { type: 'delegation', target: 'client', id: item.id, content },
+    item: {
+      type: 'delegation', target: 'client', id: item.id, content,
+      ...(typeof item.user_bidi_turn_id === 'string' && item.user_bidi_turn_id
+        ? { userTurnId: item.user_bidi_turn_id } : {}),
+    },
   }
 }
 

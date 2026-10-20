@@ -21,6 +21,7 @@ describe('Frameless Bidi server events', () => {
         type: 'delegation',
         target: 'client',
         id: 'delegation-7',
+        user_bidi_turn_id: 'user-7',
         content: [
           { type: 'input_text', text: 'Inspect the failing build. ' },
           { type: 'output_text', text: 'ignored' },
@@ -34,6 +35,7 @@ describe('Frameless Bidi server events', () => {
         type: 'delegation',
         target: 'client',
         id: 'delegation-7',
+        userTurnId: 'user-7',
         content: [
           { type: 'input_text', text: 'Inspect the failing build. ' },
           { type: 'input_text', text: 'Repair the root cause.' },

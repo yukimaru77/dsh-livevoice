@@ -1,5 +1,56 @@
 import { describe, expect, it } from 'vitest'
-import { meterHeights, shouldGateEcho, smoothLevel } from '../src/client/levels.ts'
+import { InputActivityDetector, meterHeights, shouldGateEcho, smoothLevel } from '../src/client/levels.ts'
+
+function observeFor(detector: InputActivityDetector, level: number, from: number, to: number, enabled = true): boolean[] {
+  const events: boolean[] = []
+  for (let now = from; now <= to; now += 50) {
+    const event = detector.observe(level, now, enabled)
+    if (event !== undefined) events.push(event)
+  }
+  return events
+}
+
+describe('local input activity', () => {
+  it('ignores startup silence and isolated clicks, then emits one start and one end for speech', () => {
+    const detector = new InputActivityDetector()
+    expect(observeFor(detector, 0, 0, 2_000)).toEqual([])
+    expect(detector.observe(0.5, 2_050)).toBeUndefined()
+    expect(observeFor(detector, 0, 2_100, 2_600)).toEqual([])
+    expect(observeFor(detector, 0.03, 2_650, 2_850)).toEqual([true])
+    expect(observeFor(detector, 0.03, 2_900, 3_500)).toEqual([])
+    expect(observeFor(detector, 0, 3_550, 5_300)).toEqual([])
+    expect(detector.observe(0, 5_350)).toBe(false)
+    expect(observeFor(detector, 0, 5_400, 8_000)).toEqual([])
+  })
+
+  it('keeps an utterance open across brief pauses and detects a later utterance', () => {
+    const detector = new InputActivityDetector()
+    expect(observeFor(detector, 0.03, 0, 250)).toEqual([true])
+    expect(observeFor(detector, 0, 300, 1_000)).toEqual([])
+    expect(observeFor(detector, 0.03, 1_050, 1_500)).toEqual([])
+    expect(observeFor(detector, 0, 1_550, 3_350)).toEqual([false])
+    expect(observeFor(detector, 0.03, 3_400, 3_650)).toEqual([true])
+  })
+
+  it('resets when capture is disabled without treating mute as an utterance end', () => {
+    const detector = new InputActivityDetector()
+    expect(observeFor(detector, 0.03, 0, 500, false)).toEqual([])
+    expect(observeFor(detector, 0.03, 550, 800)).toEqual([true])
+    expect(observeFor(detector, 0, 850, 3_000, false)).toEqual([])
+    expect(observeFor(detector, 0, 3_050, 5_000)).toEqual([])
+    expect(observeFor(detector, 0.03, 5_050, 5_300)).toEqual([true])
+  })
+
+  it('does not count an unobserved background-frame gap as sustained speech or silence', () => {
+    const detector = new InputActivityDetector()
+    expect(detector.observe(0.03, 0)).toBeUndefined()
+    expect(detector.observe(0.03, 10_000)).toBeUndefined()
+    expect(observeFor(detector, 0.03, 10_050, 10_250)).toEqual([true])
+    expect(detector.observe(0, 20_000)).toBeUndefined()
+    expect(observeFor(detector, 0, 20_050, 21_750)).toEqual([])
+    expect(detector.observe(0, 21_800)).toBe(false)
+  })
+})
 
 describe('echo gate', () => {
   it('drops quiet mic samples while the speaker is active', () => {

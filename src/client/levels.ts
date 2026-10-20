@@ -26,6 +26,60 @@ export function smoothLevel(previous: number, next: number, attack = 0.35, relea
 }
 
 const METER_FLOOR = 0.012
+const INPUT_SPEECH_MS = 200
+const INPUT_SILENCE_MS = 1_800
+
+/** Local acoustic boundaries only; transcription remains on the live service. */
+export class InputActivityDetector {
+  private speaking = false
+  private voicedMs = 0
+  private quietMs = 0
+  private lastSampleAt: number | undefined
+  private lastAbove = false
+
+  reset(): void {
+    this.speaking = false
+    this.voicedMs = 0
+    this.quietMs = 0
+    this.lastSampleAt = undefined
+    this.lastAbove = false
+  }
+
+  observe(level: number, now: number, enabled = true): boolean | undefined {
+    if (!enabled) {
+      // Muting/cancelling is not an instruction to submit a partial utterance.
+      this.reset()
+      return undefined
+    }
+    const gap = this.lastSampleAt === undefined ? 0 : now - this.lastSampleAt
+    const elapsed = gap > 0 && gap <= 250 ? gap : 0
+    if (gap > 250 || gap < 0) {
+      // A suspended/backgrounded animation frame is not observed silence.
+      this.quietMs = 0
+      if (!this.speaking) this.voicedMs = 0
+    }
+    this.lastSampleAt = now
+    const above = level >= METER_FLOOR
+    if (above) {
+      this.quietMs = 0
+      if (this.lastAbove) this.voicedMs += elapsed
+    } else {
+      if (!this.lastAbove) this.quietMs += elapsed
+      if (!this.speaking && this.quietMs >= 400) this.voicedMs = 0
+    }
+    this.lastAbove = above
+    if (!this.speaking && above && this.voicedMs >= INPUT_SPEECH_MS) {
+      this.speaking = true
+      return true
+    }
+    if (this.speaking && this.quietMs >= INPUT_SILENCE_MS) {
+      this.speaking = false
+      this.voicedMs = 0
+      return false
+    }
+    return undefined
+  }
+}
 
 export function meterHeights(input: number): number[] {
   const energy = Math.sqrt(Math.max(0, Math.min(1, input)))
@@ -38,6 +92,7 @@ export function meterHeights(input: number): number[] {
 export function createLevelMonitor(
   stream: MediaStream,
   onLevel: (level: number) => void,
+  onSample?: (level: number, now: number) => void,
 ): () => void {
   const context = new AudioContext({ latencyHint: 'interactive' })
   const source = context.createMediaStreamSource(stream)
@@ -50,7 +105,9 @@ export function createLevelMonitor(
   let smoothed = 0
   let lastEmit = 0
   const tick = (now: number): void => {
-    smoothed = smoothLevel(smoothed, rmsFromAnalyser(analyser, buffer))
+    const raw = rmsFromAnalyser(analyser, buffer)
+    onSample?.(raw, now)
+    smoothed = smoothLevel(smoothed, raw)
     if (now - lastEmit >= 80) {
       lastEmit = now
       onLevel(smoothed)

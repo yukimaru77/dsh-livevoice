@@ -5,13 +5,14 @@ import type { LiveUsageMetric, LiveUsageSource } from '../protocol.js'
 import {
   fetchLiveStatus,
   LiveCallError,
+  sendLiveInputActivity,
   startLiveCall,
   stopLiveCall,
   subscribeLiveEvents,
   type LiveStatus,
   type LiveUiEvent,
 } from './api.js'
-import { createLevelMonitor } from './levels.js'
+import { createLevelMonitor, InputActivityDetector } from './levels.js'
 import { unlockPlayback, type PreparedPlayback } from './playback.js'
 import { acceptLiveAnswer, createLivePeer, type LivePeer } from './webrtc.js'
 import { parseLiveServerEvent, type LivePhase } from '../protocol.js'
@@ -68,6 +69,8 @@ export class LiveClientSession {
   private remoteStream: MediaStream | undefined
   private stopEvents: (() => void) | undefined
   private stopInputLevels: (() => void) | undefined
+  private readonly inputActivity = new InputActivityDetector()
+  private inputActivitySequence = 0
   private callToken: string | undefined
   private startAbort: AbortController | undefined
   private starting = false
@@ -155,6 +158,7 @@ export class LiveClientSession {
   toggleMute(): void {
     if (this.state.phase === 'idle') return
     const muted = !this.state.muted
+    this.inputActivity.reset()
     // Keep RTP disabled throughout dialing; this records the user's eventual
     // mute choice without turning a mute toggle into a readiness transition.
     this.peer?.setMuted(this.starting ? true : muted)
@@ -173,6 +177,8 @@ export class LiveClientSession {
     const abort = new AbortController()
     this.startAbort = abort
     this.starting = true
+    this.inputActivity.reset()
+    this.inputActivitySequence = 0
     this.sessionProofReady = false
     this.pendingPhase = undefined
     this.patch({
@@ -233,6 +239,13 @@ export class LiveClientSession {
         onControlPayload: payload => {
           if (gen === this.startGen) this.applyControlPayload(payload)
         },
+        onMicrophoneEnded: () => {
+          if (gen !== this.startGen) return
+          void this.stop(
+            'Microphone capture ended. Reconnect your microphone, then try again.',
+            'media',
+          )
+        },
         signal: abort.signal,
       })
       if (gen !== this.startGen) {
@@ -250,6 +263,13 @@ export class LiveClientSession {
         }
         if (Math.abs(level - this.state.inputLevel) < 0.02) return
         this.patch({ inputLevel: level })
+      }, (level, now) => {
+        if (gen !== this.startGen) return
+        const enabled = !this.starting && !this.state.muted && this.callToken !== undefined
+          && this.state.phase !== 'idle' && this.state.phase !== 'connecting'
+          && created.peer.isMicrophoneUsable()
+        const speaking = this.inputActivity.observe(level, now, enabled)
+        if (speaking !== undefined) this.sendInputActivity(gen, speaking)
       })
       this.patch({ stage: 'dial.codex' })
       const call = await startLiveCall({
@@ -306,6 +326,7 @@ export class LiveClientSession {
   async stop(error?: string, kind?: LiveFailureKind): Promise<void> {
     this.startGen += 1
     this.starting = false
+    this.inputActivity.reset()
     this.startAbort?.abort()
     this.startAbort = undefined
     this.rejectSessionProof(new Error('Live voice start was cancelled'))
@@ -346,6 +367,17 @@ export class LiveClientSession {
         // Local teardown still completes if the host call is already gone.
       }
     }
+  }
+
+  private sendInputActivity(gen: number, speaking: boolean): void {
+    const callToken = this.callToken
+    if (gen !== this.startGen || callToken === undefined) return
+    const sequence = ++this.inputActivitySequence
+    void sendLiveInputActivity(callToken, sequence, speaking).catch(error => {
+      if (gen !== this.startGen || callToken !== this.callToken) return
+      const detail = error instanceof Error ? error.message : String(error)
+      void this.stop(`Could not report microphone activity: ${detail}. Try again.`, 'network')
+    })
   }
 
   private applyControlPayload(payload: string): void {

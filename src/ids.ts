@@ -9,6 +9,7 @@ export const LIVE_STATUS_PATH = `${LIVE_HTTP_PREFIX}/status`
 export const LIVE_CALLS_PATH = `${LIVE_HTTP_PREFIX}/calls`
 export const LIVE_EVENTS_PATH = `${LIVE_HTTP_PREFIX}/events`
 export const LIVE_STOP_PATH = `${LIVE_HTTP_PREFIX}/stop`
+export const LIVE_INPUT_ACTIVITY_PATH = `${LIVE_HTTP_PREFIX}/input-activity`
 export const LIVE_MICROPHONE_SETTINGS_PATH = `${LIVE_HTTP_PREFIX}/microphone-settings`
 
 export const LIVE_PROVIDER = 'openai-codex'

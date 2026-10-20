@@ -11,6 +11,8 @@ export interface RoleTranscript {
   text: string
   turn: number
   final: boolean
+  /** Upstream ID when an explicit user turn has claimed this ASR bucket. */
+  id?: string
 }
 
 export interface TranscriptState {
@@ -51,7 +53,10 @@ export function ingestLiveEvent(
       return next ?? closed
     }
     case 'turn.created': {
-      const tracked = rememberTurn(state, event.turn.id, event.turn.role)
+      if (event.turn.role === 'user' && event.turn.id !== undefined
+        && state.turnRoles?.[event.turn.id] === 'user') return null
+      const opened = event.turn.role === 'user' ? openUserTurn(state, event.turn.id) : state
+      const tracked = rememberTurn(opened, event.turn.id, event.turn.role)
       const closed = event.turn.role === 'assistant' ? closeOpenUser(tracked) : null
       const base = closed?.state ?? tracked
       const next = applyAdd(base, event.turn.role, event.turn.transcript)
@@ -64,7 +69,8 @@ export function ingestLiveEvent(
       // before the user turn's last words arrived) belongs to that turn;
       // its turn.done carries the full text, so never graft it onto the
       // other role.
-      if (known !== undefined && state[known].final) return null
+      if (known !== undefined && (state[known].final
+        || (state[known].id !== undefined && state[known].id !== event.turnId))) return null
       return applyAdd(state, known ?? openRole(state), event.delta)
     }
     case 'turn.done': {
@@ -74,6 +80,16 @@ export function ingestLiveEvent(
     default:
       return null
   }
+}
+
+function openUserTurn(state: TranscriptState, id: string | undefined): TranscriptState {
+  if (id === undefined) return state
+  const current = state.user
+  // ASR fragments can precede turn.created; attach its ID without erasing them.
+  const user = !current.final && current.id === undefined
+    ? { ...current, id }
+    : { text: '', turn: current.turn + 1, final: false, id }
+  return { ...state, user }
 }
 
 function rememberTurn(
@@ -119,7 +135,7 @@ function applyAdd(
   let turn = current.turn
   let nextText: string
   if (!current.text) {
-    turn += 1
+    if (current.final) turn += 1
     nextText = normalized
   } else if (current.final) {
     if (normalized === current.text || current.text.endsWith(normalized)) return null
@@ -134,7 +150,10 @@ function applyAdd(
   } else {
     nextText = joinFragment(current.text, text)
   }
-  const bucket = { text: nextText, turn, final: false }
+  const bucket = {
+    ...(turn === current.turn && current.id !== undefined ? { id: current.id } : {}),
+    text: nextText, turn, final: false,
+  }
   const emit: LiveTranscript = { role, text: nextText, turn, final: false }
   return { state: { ...state, [role]: bucket }, emit }
 }
@@ -146,14 +165,16 @@ function applyFinish(
 ): TranscriptUpdate | null {
   const current = state[role]
   let turn = current.turn
-  if (!current.text) turn += 1
-  else if (current.final && text.trim() !== current.text) turn += 1
+  if (current.final && (!current.text || text.trim() !== current.text)) turn += 1
   const trimmed = text.trim()
   if (!trimmed && !current.text) return null
   const nextText = !current.final && current.text.startsWith(trimmed) && current.text.length > trimmed.length
     ? current.text
     : trimmed || current.text
-  const bucket = { text: nextText, turn, final: true }
+  const bucket = {
+    ...(turn === current.turn && current.id !== undefined ? { id: current.id } : {}),
+    text: nextText, turn, final: true,
+  }
   const emit: LiveTranscript = { role, text: nextText, turn, final: true }
   return { state: { ...state, [role]: bucket }, emit }
 }

@@ -10,6 +10,7 @@ import {
   LIVE_MICROPHONE_SETTINGS_PATH,
   LIVE_CALLS_PATH,
   LIVE_EVENTS_PATH,
+  LIVE_INPUT_ACTIVITY_PATH,
   LIVE_STATUS_PATH,
   LIVE_STOP_PATH,
 } from './ids.js'
@@ -146,6 +147,32 @@ export function registerLiveVoiceRoutes(ctx: Context, registry: LiveCallRegistry
         req.on('close', () => { unsubscribe() })
       },
     }), 'dsh-livevoice events')
+
+    webCtx.effect(() => webCtx.webServer.register({
+      kind: 'exact',
+      path: LIVE_INPUT_ACTIVITY_PATH,
+      handler: async (req, res) => {
+        if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+        if (!trustedRequest(req)) return json(res, 403, { error: 'forbidden' })
+        let body: unknown
+        try {
+          body = await readJson(req)
+        } catch {
+          return json(res, 400, { error: 'invalid json' })
+        }
+        const callToken = stringField(body, 'callToken')
+        const fields = typeof body === 'object' && body !== null ? body as Record<string, unknown> : {}
+        const { sequence, speaking } = fields
+        if (!callToken || typeof sequence !== 'number' || !Number.isSafeInteger(sequence)
+          || sequence < 1 || typeof speaking !== 'boolean') {
+          return json(res, 400, { error: 'callToken, positive integer sequence and boolean speaking are required' })
+        }
+        const call = registry.get(callToken)
+        if (call === undefined) return json(res, 404, { error: 'live call not found' })
+        call.setInputActivity(sequence, speaking)
+        json(res, 200, { accepted: true })
+      },
+    }), 'dsh-livevoice input activity')
 
     webCtx.effect(() => webCtx.webServer.register({
       kind: 'exact',
